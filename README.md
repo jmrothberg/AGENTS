@@ -242,6 +242,142 @@ Tested on NVIDIA Blackwell GPUs (DGX Spark). The scripts include Blackwell-speci
 /home/jonathan/Models_Transformer/LFM2.5-VL-1.6B
 ```
 
+---
+
+# Obedient Beast - Personal AI Agent
+
+**A minimal, powerful AI agent with WhatsApp integration.**
+
+Obedient Beast is a personal AI assistant that can:
+- Execute shell commands on your computer
+- Read, write, and edit files
+- Connect to WhatsApp for 24/7 messaging
+- Use your local LFM server, OpenAI, or Claude as the LLM backend
+
+## Quick Start
+
+```bash
+cd obedient_beast
+
+# 1. Set up environment
+cp .env.example ../.env
+# Edit ../.env with your API keys and settings
+
+# 2. Install Python dependencies
+pip install -r requirements.txt
+
+# 3. Run CLI mode (for testing)
+python beast.py
+
+# 4. Run with WhatsApp (requires Node.js)
+./start.sh
+```
+
+## Architecture
+
+```
+You (WhatsApp) → bridge.js → server.py → beast.py → LLM → Tools → Response
+```
+
+## Files
+
+| File | Description |
+|------|-------------|
+| `beast.py` | Agent loop + tools + CLI interface |
+| `llm.py` | Unified LLM client (LFM/OpenAI/Claude) |
+| `server.py` | Flask server for WhatsApp bridge |
+| `start.sh` | Easy startup script |
+| `whatsapp/bridge.js` | Baileys WhatsApp connector |
+| `workspace/SOUL.md` | Agent personality configuration |
+
+## Configuration (.env)
+
+```bash
+# LLM Backend: "lfm", "openai", or "claude"
+LLM_BACKEND=claude
+
+# Your LFM Server (when using lfm backend)
+LFM_URL=http://192.168.1.100:8000
+
+# API Keys
+ANTHROPIC_API_KEY=sk-ant-...
+OPENAI_API_KEY=sk-...
+
+# WhatsApp - Only respond to these numbers
+ALLOWED_NUMBERS=+12025551234
+```
+
+## Tools
+
+Beast has these built-in tools:
+
+| Tool | Description |
+|------|-------------|
+| `shell` | Execute any terminal command |
+| `read_file` | Read file contents |
+| `write_file` | Create/write files |
+| `edit_file` | Find & replace text in files |
+| `list_dir` | List directory contents |
+
+## WhatsApp Setup
+
+1. **Install Node.js**: `brew install node`
+
+2. **Install dependencies**:
+   ```bash
+   cd obedient_beast/whatsapp
+   npm install
+   ```
+
+3. **Start everything**:
+   ```bash
+   cd obedient_beast
+   ./start.sh
+   ```
+
+4. **Scan QR code** with WhatsApp (Settings → Linked Devices)
+
+5. **Message yourself** or use a solo group to chat with Beast
+
+### WhatsApp Security
+
+- Beast uses YOUR WhatsApp account (not a separate bot)
+- Set `ALLOWED_NUMBERS` to restrict who can trigger responses
+- Group messages only respond to the account owner
+- DMs check against the allowlist
+
+## Commands
+
+```bash
+./start.sh          # Start server + WhatsApp bridge
+./start.sh stop     # Stop everything
+./start.sh status   # Check if running
+./start.sh server   # Start only Python server
+./start.sh whatsapp # Start only WhatsApp bridge
+```
+
+## Using with Your LFM Server
+
+1. Start your LFM server (see main README above)
+2. Set in `.env`:
+   ```bash
+   LLM_BACKEND=lfm
+   LFM_URL=http://YOUR_SERVER_IP:8000
+   ```
+3. Run Beast - it will use your local model!
+
+**Note**: For full tool-calling support, use a model that supports OpenAI-style function calling (e.g., Qwen3-32B, Llama-3.3-70B). Basic chat works with any model.
+
+## Recommended Models for Tool Calling
+
+| Model | Size (4-bit) | Tool Calling |
+|-------|-------------|--------------|
+| Qwen3-32B-MLX-4bit | ~18GB | Native |
+| Llama-3.3-70B-Instruct-4bit | ~40GB | Native |
+| Qwen2.5-72B-Instruct-4bit | ~41GB | Native |
+
+---
+
 ## License
 
 MIT

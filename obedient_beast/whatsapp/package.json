@@ -1,0 +1,14 @@
+{
+  "name": "obedient-beast-whatsapp",
+  "version": "1.0.0",
+  "type": "module",
+  "description": "WhatsApp bridge for Obedient Beast using Baileys",
+  "main": "bridge.js",
+  "scripts": {
+    "start": "node bridge.js"
+  },
+  "dependencies": {
+    "@whiskeysockets/baileys": "^6.7.9",
+    "qrcode-terminal": "^0.12.0"
+  }
+}

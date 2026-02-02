@@ -1,0 +1,30 @@
+# Environment and secrets
+.env
+*.env
+!.env.example
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+.venv/
+venv/
+ENV/
+
+# Obedient Beast - sensitive data
+obedient_beast/sessions/
+obedient_beast/whatsapp/auth_info/
+obedient_beast/whatsapp/node_modules/
+obedient_beast/.server.pid
+obedient_beast/.whatsapp.pid
+
+# macOS
+.DS_Store
+*.swp
+
+# IDE
+.idea/
+.vscode/
+*.sublime-*
