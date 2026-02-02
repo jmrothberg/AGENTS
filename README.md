@@ -6,20 +6,30 @@ Local inference scripts for LiquidAI's LFM-2.5 models. Supports both:
 - **macOS** (Apple Silicon) using MLX for optimized inference
 - **Ubuntu/Linux** (NVIDIA GPUs) using transformers/PyTorch
 
+## Features
+
+- **Interactive Mode**: Chat directly in the terminal
+- **Server Mode**: OpenAI-compatible API server accessible on your local network
+- **Streaming**: Real-time token streaming (macOS/MLX text models)
+- **Vision**: Image and video analysis (VL models)
+- **TTS**: Optional text-to-speech for responses
+
 ## Models
 
 | Model | Size | Description |
 |-------|------|-------------|
 | LFM2.5-1.2B-Thinking | 1.2B params | Text-only reasoning model |
 | LFM2.5-VL-1.6B | 1.6B params | Vision-Language model (images + video) |
+| GLM-4.7-Flash | 4.7B params | Fast text-only model (macOS) |
+| MiniMax-M2.1-REAP-50 | - | Text-only model (macOS) |
 
 ## Scripts
 
 ### `lfm_thinking.py`
-Interactive chat interface supporting text, images, and video analysis.
+Main script - Interactive chat OR OpenAI-compatible server.
 
-### `glm_flash.py`
-GLM-4.7-Flash-FP8 script (note: FP8 not yet supported on Blackwell GPUs).
+### `test_client.py`
+Streaming test client for the server mode.
 
 ## Usage
 
@@ -27,14 +37,117 @@ GLM-4.7-Flash-FP8 script (note: FP8 not yet supported on Blackwell GPUs).
 python lfm_thinking.py
 ```
 
-Select model at startup:
-- **1** = Text-only reasoning
-- **2** = Vision-Language (images + video)
+### Step 1: Select Model
+- **1** = LFM2.5-1.2B-Thinking (Text-only reasoning)
+- **2** = LFM2.5-VL-1.6B (Vision-Language)
+- **3** = GLM-4.7-Flash (macOS only)
+- **4** = MiniMax-M2.1-REAP-50 (macOS only)
 
-### Media Options (VL Model)
+### Step 2: Select Mode
+- **1** = Interactive chat (local terminal)
+- **2** = Server mode (OpenAI-compatible API)
+
+### Media Options (VL Model, Interactive Mode)
 - `i` = Image (opens file dialog)
 - `v` = Video analysis
 - `n` = Text only
+
+---
+
+## Server Mode (OpenAI-Compatible API)
+
+Run the model as an API server accessible from any device on your local network.
+
+### Starting the Server
+
+```bash
+python lfm_thinking.py
+# Select model (e.g., 1)
+# Select mode 2 (Server)
+# Accept default port 8000 or enter custom
+```
+
+The server will display:
+```
+🚀 OpenAI-Compatible Server Starting
+============================================================
+Model: LFM2.5-1.2B-Thinking
+Type:  text
+============================================================
+Access URLs:
+  Local:   http://localhost:8000
+  Network: http://192.168.x.x:8000
+============================================================
+```
+
+### API Endpoints
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/` | GET | Health check |
+| `/v1/models` | GET | List available models |
+| `/v1/chat/completions` | POST | Chat completions (OpenAI format) |
+
+### Example: curl
+
+```bash
+curl http://192.168.x.x:8000/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{"model": "LFM2.5-1.2B-Thinking", "messages": [{"role": "user", "content": "Hello!"}]}'
+```
+
+### Example: Python OpenAI Client
+
+```python
+from openai import OpenAI
+
+client = OpenAI(base_url="http://192.168.x.x:8000/v1", api_key="not-needed")
+response = client.chat.completions.create(
+    model="LFM2.5-1.2B-Thinking",
+    messages=[{"role": "user", "content": "Hello!"}]
+)
+print(response.choices[0].message.content)
+```
+
+### Example: Streaming with Python
+
+```python
+from openai import OpenAI
+
+client = OpenAI(base_url="http://192.168.x.x:8000/v1", api_key="not-needed")
+stream = client.chat.completions.create(
+    model="LFM2.5-1.2B-Thinking",
+    messages=[{"role": "user", "content": "Write a poem"}],
+    stream=True
+)
+for chunk in stream:
+    if chunk.choices[0].delta.content:
+        print(chunk.choices[0].delta.content, end="", flush=True)
+```
+
+### Test Client
+
+Use the included test client for interactive streaming chat:
+
+```bash
+python test_client.py              # localhost:8000
+python test_client.py 192.168.x.x  # custom host
+python test_client.py 192.168.x.x 8080  # custom host and port
+```
+
+Type `quit` to exit.
+
+### Platform Support
+
+| Feature | macOS (MLX) | Linux (Transformers) |
+|---------|-------------|---------------------|
+| Interactive Mode | ✅ | ✅ |
+| Server Mode | ✅ | ✅ |
+| Streaming | ✅ (text models) | ❌ (non-streaming) |
+
+**Note**: Streaming is currently only implemented for MLX text models on macOS. Linux/transformers falls back to non-streaming responses.
+
+---
 
 ## Video Analysis
 
@@ -91,7 +204,13 @@ pip install -r requirements.txt
 - `opencv-python` - Video processing
 - `pyttsx3` - Text-to-speech (optional)
 
+### Server Mode Dependencies
+- `fastapi` - Web framework for API server
+- `uvicorn` - ASGI server
+- `pydantic` - Data validation
+
 ### macOS (Apple Silicon)
+- `mlx-lm` - MLX Language Models (text)
 - `mlx-vlm` - MLX Vision Language Models
 - `torchvision` - Required by mlx_vlm processor
 
