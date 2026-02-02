@@ -1,0 +1,33 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>High-Low Game</title>
+    <style>
+        body { font-family: Arial, sans-serif; padding: 20px; }
+        input { padding: 8px; margin: 5px; }
+        #result { margin-top: 20px; }
+    </style>
+</head>
+<body>
+    <h2>High-Low Game</h2>
+    <div>
+        <label for="high">High Number:</label>
+        <input type="number" id="high" placeholder="Enter High Number" min="1">
+    </div>
+    <div>
+        <label for="low">Low Number:</label>
+        <input type="number" id="low" placeholder="Enter Low Number" min="1">
+    </div>
+    <button onclick="calculate()">Calculate High-Low</button>
+    <div id="result"></div>
+
+    <script>
+        function calculate() {
+            const high = parseInt(document.getElementById('high').value);
+            const low = parseInt(document.getElementById('low').value);
+            const result = document.getElementById('result');
+            result.textContent = `High: ${high}, Low: ${low}, Difference: ${high - low}`;
+        }
+    </script>
+</body>
+</html>

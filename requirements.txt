@@ -1,0 +1,30 @@
+# Requirements for LFM-2.5 Inference Script
+# Supports both macOS (MLX) and Ubuntu/Linux (transformers)
+
+# Core dependencies (all platforms)
+pillow>=10.0.0                    # PIL/Pillow for image processing
+opencv-python>=4.8.0              # cv2 for video processing
+pyttsx3>=2.90                     # Text-to-speech (optional)
+
+# Server mode dependencies (OpenAI-compatible API)
+fastapi>=0.100.0                  # Web framework for API server
+uvicorn>=0.23.0                   # ASGI server for FastAPI
+pydantic>=2.0.0                   # Data validation for API
+
+# macOS-specific dependencies (Apple Silicon MLX)
+mlx-vlm>=0.0.4                    # MLX Vision Language Models for macOS
+torchvision>=0.15.0               # Required by mlx_vlm for LFM model processor
+
+# Ubuntu/Linux-specific dependencies (CUDA/CPU)
+torch>=2.0.0                      # PyTorch for model inference
+transformers>=4.30.0              # Hugging Face transformers library
+accelerate>=0.20.0                # Required for transformers device mapping
+
+# Optional: For CUDA support on Linux (uncomment if needed)
+# torch-audio>=2.0.0               # Audio processing with CUDA
+# torchaudio>=2.0.0                # Audio processing
+
+# Development/Testing (optional)
+# pytest>=7.0.0                     # For running tests
+# black>=23.0.0                    # Code formatting
+# flake8>=6.0.0                    # Linting
