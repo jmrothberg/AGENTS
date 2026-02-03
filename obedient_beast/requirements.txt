@@ -4,3 +4,11 @@ anthropic>=0.25.0
 openai>=1.30.0
 python-dotenv>=1.0.0
 flask>=3.0.0
+
+# Computer Control (Phase 1)
+pyautogui>=0.9.54
+mss>=9.0.0
+pillow>=10.0.0
+
+# MCP Client (Phase 2)
+mcp>=1.0.0

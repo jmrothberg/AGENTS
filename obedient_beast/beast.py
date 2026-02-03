@@ -22,6 +22,43 @@ load_dotenv()
 from llm import get_llm, ToolCall
 
 # ---------------------------------------------------------------------------
+# MCP Support (Phase 2 - Optional)
+# ---------------------------------------------------------------------------
+# MCP tools are loaded dynamically if MCP servers are configured and running
+
+MCP_ENABLED = os.getenv("MCP_ENABLED", "false").lower() == "true"
+_mcp_client = None
+
+def get_mcp_tools() -> list[dict]:
+    """Get MCP tools if MCP is enabled and servers are running."""
+    global _mcp_client
+    if not MCP_ENABLED:
+        return []
+    try:
+        from mcp_client import get_mcp_client, init_mcp
+        if _mcp_client is None:
+            _mcp_client = init_mcp()
+        return _mcp_client.get_tools_for_llm()
+    except Exception as e:
+        print(f"[MCP] Not available: {e}", file=sys.stderr)
+        return []
+
+def execute_mcp_tool(name: str, args: dict) -> str:
+    """Execute an MCP tool."""
+    global _mcp_client
+    if _mcp_client is None:
+        return "Error: MCP not initialized"
+    try:
+        from mcp_client import execute_mcp_tool as mcp_exec
+        return mcp_exec(name, args)
+    except Exception as e:
+        return f"Error executing MCP tool: {e}"
+
+def get_all_tools() -> list[dict]:
+    """Get all available tools: built-in + MCP."""
+    return TOOLS + get_mcp_tools()
+
+# ---------------------------------------------------------------------------
 # Configuration
 # ---------------------------------------------------------------------------
 
@@ -71,6 +108,44 @@ TOOLS = [
         "name": "edit_file",
         "description": "Replace text in a file. Finds 'old_text' and replaces with 'new_text'.",
         "params": {"path": "Path to the file", "old_text": "Text to find", "new_text": "Text to replace with"}
+    },
+    # ---------------------------------------------------------------------------
+    # Computer Control Tools (Phase 1)
+    # ---------------------------------------------------------------------------
+    {
+        "name": "screenshot",
+        "description": "Take a screenshot of the screen. Returns the file path to the saved image.",
+        "params": {"filename": "Optional filename (default: screenshot_timestamp.png)"}
+    },
+    {
+        "name": "mouse_click",
+        "description": "Click the mouse at specific screen coordinates.",
+        "params": {"x": "X coordinate", "y": "Y coordinate", "button": "Mouse button: left, right, or middle (default: left)"}
+    },
+    {
+        "name": "mouse_move",
+        "description": "Move the mouse to specific screen coordinates.",
+        "params": {"x": "X coordinate", "y": "Y coordinate"}
+    },
+    {
+        "name": "keyboard_type",
+        "description": "Type text using the keyboard.",
+        "params": {"text": "Text to type"}
+    },
+    {
+        "name": "keyboard_hotkey",
+        "description": "Press a keyboard shortcut (e.g., 'command+c' for copy on Mac).",
+        "params": {"keys": "Keys to press, separated by + (e.g., 'command+shift+s')"}
+    },
+    {
+        "name": "get_screen_size",
+        "description": "Get the screen dimensions.",
+        "params": {}
+    },
+    {
+        "name": "get_mouse_position",
+        "description": "Get the current mouse cursor position.",
+        "params": {}
     },
 ]
 
@@ -125,6 +200,63 @@ def execute_tool(name: str, args: dict) -> str:
             new_content = content.replace(args["old_text"], args["new_text"], 1)
             path.write_text(new_content)
             return f"Successfully replaced text in {path}"
+        
+        # ---------------------------------------------------------------------------
+        # Computer Control Tools (Phase 1)
+        # ---------------------------------------------------------------------------
+        elif name == "screenshot":
+            import mss
+            from datetime import datetime as dt
+            filename = args.get("filename") or f"screenshot_{dt.now().strftime('%Y%m%d_%H%M%S')}.png"
+            screenshot_dir = WORKSPACE / "screenshots"
+            screenshot_dir.mkdir(exist_ok=True)
+            filepath = screenshot_dir / filename
+            with mss.mss() as sct:
+                sct.shot(output=str(filepath))
+            return f"Screenshot saved to {filepath}"
+        
+        elif name == "mouse_click":
+            import pyautogui
+            x = int(args["x"])
+            y = int(args["y"])
+            button = args.get("button", "left")
+            pyautogui.click(x, y, button=button)
+            return f"Clicked {button} button at ({x}, {y})"
+        
+        elif name == "mouse_move":
+            import pyautogui
+            x = int(args["x"])
+            y = int(args["y"])
+            pyautogui.moveTo(x, y)
+            return f"Moved mouse to ({x}, {y})"
+        
+        elif name == "keyboard_type":
+            import pyautogui
+            text = args["text"]
+            pyautogui.write(text)
+            return f"Typed {len(text)} characters"
+        
+        elif name == "keyboard_hotkey":
+            import pyautogui
+            keys = args["keys"].split("+")
+            pyautogui.hotkey(*keys)
+            return f"Pressed hotkey: {args['keys']}"
+        
+        elif name == "get_screen_size":
+            import pyautogui
+            width, height = pyautogui.size()
+            return f"Screen size: {width}x{height} pixels"
+        
+        elif name == "get_mouse_position":
+            import pyautogui
+            x, y = pyautogui.position()
+            return f"Mouse position: ({x}, {y})"
+        
+        # ---------------------------------------------------------------------------
+        # MCP Tools (Phase 2) - handled by prefix
+        # ---------------------------------------------------------------------------
+        elif name.startswith("mcp_"):
+            return execute_mcp_tool(name, args)
         
         else:
             return f"Error: Unknown tool: {name}"
@@ -181,9 +313,10 @@ def run(user_input: str, session_id: str = "default", llm=None) -> str:
     save_message(session_id, user_msg)
     
     max_turns = 10
+    all_tools = get_all_tools()  # Built-in + MCP tools
     for turn in range(max_turns):
         # Call LLM
-        response = llm.chat(history, tools=TOOLS, system=SYSTEM_PROMPT)
+        response = llm.chat(history, tools=all_tools, system=SYSTEM_PROMPT)
         
         if response.tool_calls:
             # Execute tools and add results to history
@@ -250,11 +383,18 @@ def cli():
     """Interactive CLI mode."""
     from llm import BACKEND
     
+    all_tools = get_all_tools()
+    builtin_count = len(TOOLS)
+    mcp_count = len(all_tools) - builtin_count
+    
     print("=" * 60)
     print("🐺 Obedient Beast - AI Assistant")
     print(f"   Backend: {BACKEND}")
+    print(f"   Tools: {builtin_count} built-in" + (f" + {mcp_count} MCP" if mcp_count > 0 else ""))
+    if MCP_ENABLED:
+        print(f"   MCP: enabled")
     print("=" * 60)
-    print("Type your message. Commands: /new (reset), /quit (exit)")
+    print("Type your message. Commands: /new (reset), /quit (exit), /tools (list)")
     print("=" * 60 + "\n")
     
     session_id = f"cli_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
@@ -274,6 +414,15 @@ def cli():
             if user_input.lower() in ["/new", "/reset"]:
                 session_id = f"cli_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
                 print("(Session reset)\n")
+                continue
+            
+            if user_input.lower() == "/tools":
+                tools = get_all_tools()
+                print("\nAvailable tools:")
+                for t in tools:
+                    prefix = "[MCP] " if t["name"].startswith("mcp_") else ""
+                    print(f"  {prefix}{t['name']}: {t['description'][:60]}...")
+                print()
                 continue
             
             print("Beast: ", end="", flush=True)
