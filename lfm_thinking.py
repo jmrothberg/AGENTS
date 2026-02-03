@@ -121,18 +121,107 @@ if not IS_MACOS:
     os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
 
 # Local model paths - platform specific
-if IS_MACOS:
-    # macOS: Use MLX quantized models
-    MLX_MODELS = {
-        "1": ("/Users/jonathanrothberg/MLX_Models/LFM2.5-1.2B-Thinking-8bit", "text", "LFM2.5-1.2B-Thinking (Text-only, reasoning)"),
-        "2": ("/Users/jonathanrothberg/MLX_Models/LFM2.5-VL-1.6B-MLX-8bit", "vision", "LFM2.5-VL-1.6B (Vision-Language, images + video)"),
-        "3": ("/Users/jonathanrothberg/MLX_Models/GLM-4.7-Flash-MLX-8bit", "text", "GLM-4.7-Flash (Text-only, fast)"),
-        "4": ("/Users/jonathanrothberg/MLX_Models/MiniMax-M2.1-REAP-50-mlx-4bit", "text", "MiniMax-M2.1-REAP-50 (Text-only)"),
-    }
-else:
-    # Ubuntu/Linux: Use transformers models
-    MLX_MODELS = {}  # Not used on Linux
+# macOS MLX models directory
+MLX_MODELS_DIR = "/Users/jonathanrothberg/MLX_Models"
+# Linux transformers models directory
+LINUX_MODELS_DIR = "/home/jonathan/Models_Transformer"
 
+def scan_mlx_models(models_dir):
+    """
+    Dynamically scan the MLX models directory and detect model types.
+    Returns dict: {"1": (path, type, description), ...}
+    
+    Model type detection:
+    - Vision models: config.json contains "vl" or "vision" in model_type, 
+      or has processor_config.json
+    - Text models: everything else
+    """
+    models = {}
+    if not os.path.exists(models_dir):
+        return models
+    
+    # Get all subdirectories (each is a model)
+    model_dirs = sorted([
+        d for d in os.listdir(models_dir) 
+        if os.path.isdir(os.path.join(models_dir, d)) and not d.startswith('.')
+    ])
+    
+    for idx, model_name in enumerate(model_dirs, 1):
+        model_path = os.path.join(models_dir, model_name)
+        config_path = os.path.join(model_path, "config.json")
+        processor_path = os.path.join(model_path, "processor_config.json")
+        
+        # Detect model type
+        model_type = "text"  # default
+        
+        # Check config.json for model_type field
+        if os.path.exists(config_path):
+            try:
+                with open(config_path, 'r') as f:
+                    config = json.load(f)
+                    mt = config.get("model_type", "").lower()
+                    # Vision models typically have "vl", "vision", "image" in model_type
+                    if any(x in mt for x in ["vl", "vision", "image"]):
+                        model_type = "vision"
+            except:
+                pass
+        
+        # Also check for processor_config.json (vision models have this)
+        if os.path.exists(processor_path):
+            model_type = "vision"
+        
+        # Create description from folder name
+        type_label = "(Vision-Language)" if model_type == "vision" else "(Text)"
+        description = f"{model_name} {type_label}"
+        
+        models[str(idx)] = (model_path, model_type, description)
+    
+    return models
+
+def scan_linux_models(models_dir):
+    """
+    Dynamically scan the Linux transformers models directory.
+    Returns dict: {"1": (path, type, description), ...}
+    """
+    models = {}
+    if not os.path.exists(models_dir):
+        return models
+    
+    model_dirs = sorted([
+        d for d in os.listdir(models_dir) 
+        if os.path.isdir(os.path.join(models_dir, d)) and not d.startswith('.')
+    ])
+    
+    for idx, model_name in enumerate(model_dirs, 1):
+        model_path = os.path.join(models_dir, model_name)
+        config_path = os.path.join(model_path, "config.json")
+        
+        # Detect model type from config
+        model_type = "text"
+        if os.path.exists(config_path):
+            try:
+                with open(config_path, 'r') as f:
+                    config = json.load(f)
+                    mt = config.get("model_type", "").lower()
+                    if any(x in mt for x in ["vl", "vision", "image"]):
+                        model_type = "vision"
+            except:
+                pass
+        
+        type_label = "(Vision-Language)" if model_type == "vision" else "(Text)"
+        description = f"{model_name} {type_label}"
+        
+        models[str(idx)] = (model_path, model_type, description)
+    
+    return models
+
+# Scan models dynamically at startup
+if IS_MACOS:
+    MLX_MODELS = scan_mlx_models(MLX_MODELS_DIR)
+else:
+    MLX_MODELS = scan_linux_models(LINUX_MODELS_DIR)
+
+# Fallback paths for Linux (legacy support)
 TEXT_MODEL_PATH = "/home/jonathan/Models_Transformer/LFM2.5-1.2B-Thinking"
 VL_MODEL_PATH = "/home/jonathan/Models_Transformer/LFM2.5-VL-1.6B"
 
