@@ -13,7 +13,8 @@ from dotenv import load_dotenv
 load_dotenv()
 
 # Config from environment
-BACKEND = os.getenv("LLM_BACKEND", "claude")  # "lfm", "openai", or "claude"
+# LLM_BACKEND_TEST allows testing different backends without changing .env
+BACKEND = os.getenv("LLM_BACKEND_TEST") or os.getenv("LLM_BACKEND", "claude")  # "lfm", "openai", or "claude"
 LFM_URL = os.getenv("LFM_URL", "http://localhost:8000")
 LFM_URL_LOCAL = "http://localhost:8000"  # Always try local first
 LFM_URL_REMOTE = os.getenv("LFM_URL_REMOTE", "http://192.168.7.57:8000")  # Fallback

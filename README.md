@@ -373,6 +373,23 @@ ALLOWED_NUMBERS=+12025551234
 MCP_ENABLED=false
 ```
 
+## Testing Different LLM Backends
+
+**Safe testing without modifying your main `.env`:**
+
+```bash
+# Test LFM (local models) temporarily
+LLM_BACKEND_TEST=lfm python3 server.py
+
+# Test OpenAI temporarily
+LLM_BACKEND_TEST=openai python3 server.py
+
+# Test Claude (default)
+python3 server.py  # Uses LLM_BACKEND from .env
+```
+
+This overrides your `.env` setting just for that session - your main config stays unchanged! Perfect for comparing models safely.
+
 ## Commands
 
 ```bash
