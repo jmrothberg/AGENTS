@@ -22,23 +22,59 @@ app = Flask(__name__)
 
 # Configuration
 PORT = int(os.getenv("BEAST_PORT", "5001"))
-ALLOWED_NUMBERS = os.getenv("ALLOWED_NUMBERS", "").split(",")
+ALLOWED_NUMBERS = [n.strip() for n in os.getenv("ALLOWED_NUMBERS", "").split(",") if n.strip()]
+ALLOWED_GROUPS = [g.strip() for g in os.getenv("ALLOWED_GROUPS", "").split(",") if g.strip()]
+RESPOND_TO_OTHERS = os.getenv("RESPOND_TO_OTHERS", "false").lower() == "true"
 
 # Per-sender session history (keyed by phone number)
 llm = get_llm()
 
 
-def is_allowed(sender: str) -> bool:
-    """Check if sender is in allowlist (empty list = allow all)."""
+def is_allowed(sender: str, chat_id: str = None) -> bool:
+    """
+    Check if sender is allowed to trigger Beast.
+    
+    Rules:
+    1. OWNER (your own messages) - always allowed
+    2. If ALLOWED_NUMBERS is empty - allow nobody except OWNER
+    3. If sender's number is in ALLOWED_NUMBERS - allowed
+    4. In groups: only respond to others if RESPOND_TO_OTHERS=true
+    5. If ALLOWED_GROUPS is set, only respond in those groups
+    """
     # Special case: OWNER means the logged-in WhatsApp account owner
     if sender == "OWNER":
+        # Check group restrictions for owner too
+        if chat_id and ALLOWED_GROUPS:
+            group_id = chat_id.split("@")[0]
+            if not any(group_id == g or group_id.endswith(g) for g in ALLOWED_GROUPS):
+                print(f"[Blocked] Group {group_id} not in allowed list")
+                return False
         return True
     
-    if not ALLOWED_NUMBERS or ALLOWED_NUMBERS == [""]:
-        return True
+    # If no allowed numbers set, only OWNER can use Beast
+    if not ALLOWED_NUMBERS:
+        print(f"[Blocked] {sender} - no allowed numbers configured (OWNER only mode)")
+        return False
+    
+    # Check if this is a group message from someone other than owner
+    is_group = chat_id and chat_id.endswith("@g.us") if chat_id else False
+    if is_group and not RESPOND_TO_OTHERS:
+        print(f"[Blocked] {sender} - RESPOND_TO_OTHERS is false")
+        return False
+    
+    # Check group restrictions
+    if is_group and ALLOWED_GROUPS:
+        group_id = chat_id.split("@")[0]
+        if not any(group_id == g or group_id.endswith(g) for g in ALLOWED_GROUPS):
+            print(f"[Blocked] Group {group_id} not in allowed list")
+            return False
+    
     # Normalize phone numbers (remove @s.whatsapp.net suffix)
     sender_clean = sender.split("@")[0]
-    return any(sender_clean.endswith(num.replace("+", "")) for num in ALLOWED_NUMBERS)
+    allowed = any(sender_clean.endswith(num.replace("+", "")) for num in ALLOWED_NUMBERS)
+    if not allowed:
+        print(f"[Blocked] {sender_clean} not in ALLOWED_NUMBERS")
+    return allowed
 
 
 @app.route("/health", methods=["GET"])
@@ -51,7 +87,7 @@ def health():
 def message():
     """
     Handle incoming message from WhatsApp bridge.
-    Expects JSON: {"text": "...", "sender": "..."}
+    Expects JSON: {"text": "...", "sender": "...", "chat_id": "..."}
     Returns JSON: {"response": "..."}
     """
     data = request.get_json()
@@ -61,14 +97,14 @@ def message():
     
     text = data.get("text", "").strip()
     sender = data.get("sender", "unknown")
+    chat_id = data.get("chat_id", "")
     
     if not text:
         return jsonify({"error": "No text provided"}), 400
     
-    # Check allowlist
-    if not is_allowed(sender):
-        print(f"[Blocked] {sender}: {text[:50]}...")
-        return jsonify({"response": "Not authorized."}), 403
+    # Check allowlist with chat context
+    if not is_allowed(sender, chat_id):
+        return jsonify({"error": "Not authorized"}), 403
     
     print(f"[{sender}] {text[:100]}...")
     

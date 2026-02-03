@@ -114,14 +114,19 @@ async function connectToWhatsApp() {
             console.log(`\n[${isGroup ? 'GROUP' : 'DM'}][${sender}] ${text}`)
             
             try {
-                // Send to Python server (sender is used for auth check)
+                // Send to Python server (sender and chat_id used for auth check)
                 const response = await fetch(`${BEAST_URL}/message`, {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ text, sender })
+                    body: JSON.stringify({ text, sender, chat_id: chatId })
                 })
                 
                 if (!response.ok) {
+                    // 403 = not authorized, silently ignore
+                    if (response.status === 403) {
+                        console.log(`[Blocked] ${sender} not authorized`)
+                        continue
+                    }
                     console.error(`Server error: ${response.status}`)
                     continue
                 }
