@@ -400,6 +400,7 @@ python3 beast.py
 ## CLI Commands
 
 In CLI mode, type:
+- `/help` - Show help and available commands
 - `/tools` - List all available tools
 - `/new` - Reset conversation
 - `/clear` - Clear all conversation history
@@ -408,6 +409,7 @@ In CLI mode, type:
 ## WhatsApp Commands
 
 Send these messages to Beast via WhatsApp:
+- `/help` - Show help and available commands
 - `/clear` - Clear all conversation history
 - `/tools` - List all available tools
 

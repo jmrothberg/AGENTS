@@ -429,6 +429,22 @@ def run(user_input: str, session_id: str = "default", llm=None) -> str:
             tool_list.append(f"  {prefix}{t['name']}: {t['description'][:60]}...")
         return "\n".join(tool_list)
 
+    if user_input.strip().lower() == "/help":
+        return """🐺 **Obedient Beast Commands:**
+
+**Management:**
+• `/help` - Show this help message
+• `/clear` - Clear all conversation history
+• `/tools` - List all available tools
+
+**Tools Available:**
+• File operations (read/write/edit/list)
+• Computer control (screenshot, mouse, keyboard)
+• Terminal/shell commands
+• Web search (with MCP enabled)
+
+Just ask me to use any tool or help with tasks!"""
+
     # Load history and add user message
     history = load_session(session_id)
     user_msg = {"role": "user", "content": user_input}
@@ -517,7 +533,7 @@ def cli():
     if MCP_ENABLED:
         print(f"   MCP: enabled")
     print("=" * 60)
-    print("Type your message. Commands: /new (reset), /clear (clear history), /quit (exit), /tools (list)")
+    print("Type your message. Commands: /help, /new (reset), /clear (clear history), /quit (exit), /tools (list)")
     print("=" * 60 + "\n")
     
     session_id = f"cli_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
