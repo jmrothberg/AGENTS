@@ -388,6 +388,10 @@ MCP_ENABLED=false
 ./start.sh server       # Python server only
 ./start.sh whatsapp     # WhatsApp bridge only
 
+# Management
+./start.sh clear-history  # Clear all conversations
+./clear_history.sh        # Quick history clear (standalone)
+
 # CLI mode (for testing)
 source ../.venv/bin/activate
 python3 beast.py
