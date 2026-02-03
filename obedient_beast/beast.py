@@ -421,6 +421,14 @@ def run(user_input: str, session_id: str = "default", llm=None) -> str:
         except Exception as e:
             return f"❌ Error clearing history: {e}"
 
+    if user_input.strip().lower() == "/tools":
+        tools = get_all_tools()
+        tool_list = ["Available tools:"]
+        for t in tools:
+            prefix = "[MCP] " if t["name"].startswith("mcp_") else ""
+            tool_list.append(f"  {prefix}{t['name']}: {t['description'][:60]}...")
+        return "\n".join(tool_list)
+
     # Load history and add user message
     history = load_session(session_id)
     user_msg = {"role": "user", "content": user_input}
