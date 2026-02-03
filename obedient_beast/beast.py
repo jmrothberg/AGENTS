@@ -408,7 +408,19 @@ def run(user_input: str, session_id: str = "default", llm=None) -> str:
     """
     if llm is None:
         llm = get_llm()
-    
+
+    # Handle slash commands before LLM processing
+    if user_input.strip().lower() in ["/clear", "/clear-history", "/reset"]:
+        try:
+            # Clear all session files for this session
+            session_dir = Path("sessions")
+            if session_dir.exists():
+                for f in session_dir.glob("*.jsonl"):
+                    f.unlink()
+            return "🧠 Memory cleared! All conversations have been forgotten."
+        except Exception as e:
+            return f"❌ Error clearing history: {e}"
+
     # Load history and add user message
     history = load_session(session_id)
     user_msg = {"role": "user", "content": user_input}
@@ -497,7 +509,7 @@ def cli():
     if MCP_ENABLED:
         print(f"   MCP: enabled")
     print("=" * 60)
-    print("Type your message. Commands: /new (reset), /quit (exit), /tools (list)")
+    print("Type your message. Commands: /new (reset), /clear (clear history), /quit (exit), /tools (list)")
     print("=" * 60 + "\n")
     
     session_id = f"cli_{datetime.now().strftime('%Y%m%d_%H%M%S')}"

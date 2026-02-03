@@ -402,7 +402,16 @@ python3 beast.py
 In CLI mode, type:
 - `/tools` - List all available tools
 - `/new` - Reset conversation
+- `/clear` - Clear all conversation history
 - `/quit` - Exit
+
+## WhatsApp Commands
+
+Send these messages to Beast via WhatsApp:
+- `/clear` - Clear all conversation history
+- `/tools` - List all available tools
+
+**Note**: Commands work the same in WhatsApp as CLI mode.
 
 ## WhatsApp Setup
 
