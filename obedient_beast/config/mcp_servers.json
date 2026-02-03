@@ -7,7 +7,7 @@
       "local": true
     },
     "git": {
-      "enabled": false,
+      "enabled": true,
       "command": "npx -y @modelcontextprotocol/server-git --repository /Users/jonathanrothberg/AGENTS/AGENTS",
       "description": "Git operations: commit, diff, log, branch, status",
       "local": true,
@@ -27,14 +27,13 @@
       "note": "Enable when you need Beast to solve complex multi-step problems"
     },
     "brave-search": {
-      "enabled": false,
+      "enabled": true,
       "command": "npx -y @modelcontextprotocol/server-brave-search",
-      "description": "Web search via Brave Search API",
+      "description": "Web search capabilities using Brave Search API",
       "local": false,
       "env": {
-        "BRAVE_API_KEY": "your-brave-api-key-here"
-      },
-      "note": "Requires Brave Search API key - data goes to Brave servers"
+        "BRAVE_API_KEY": "BSA_RItMbh9nmgrLmO7N2aHRnlwA7GS"
+      }
     }
   },
   "_comment": "Set 'enabled': true for servers you want to use. All are local except brave-search."

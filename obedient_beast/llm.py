@@ -15,6 +15,8 @@ load_dotenv()
 # Config from environment
 BACKEND = os.getenv("LLM_BACKEND", "claude")  # "lfm", "openai", or "claude"
 LFM_URL = os.getenv("LFM_URL", "http://localhost:8000")
+LFM_URL_LOCAL = "http://localhost:8000"  # Always try local first
+LFM_URL_REMOTE = os.getenv("LFM_URL_REMOTE", "http://192.168.7.57:8000")  # Fallback
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
 
@@ -66,11 +68,13 @@ class LLM:
                     "input_schema": {
                         "type": "object",
                         "properties": {k: {"type": "string"} for k in t.get("params", {})},
-                        "required": list(t.get("params", {}).keys())
+                        "required": []  # Make params optional for flexibility
                     }
                 }
                 for t in tools
             ]
+        
+        print(f"[Claude] Tools: {len(claude_tools) if claude_tools else 0}", flush=True)
         
         # Build request
         kwargs = {
@@ -84,6 +88,7 @@ class LLM:
             kwargs["tools"] = claude_tools
         
         response = client.messages.create(**kwargs)
+        print(f"[Claude] Response stop_reason: {response.stop_reason}", flush=True)
         
         # Parse response
         text = ""
@@ -156,8 +161,10 @@ class LLM:
         return LLMResponse(text=text, tool_calls=tool_calls, raw=response.model_dump())
     
     def _lfm(self, messages: list, tools: list, system: str) -> LLMResponse:
-        """Call local LFM server (OpenAI-compatible) with text-based tool calling."""
+        """Call local LFM server (OpenAI-compatible) with text-based tool calling.
+        Tries localhost first, then falls back to remote server."""
         import urllib.request
+        import urllib.error
         import re
         import uuid
         
@@ -176,21 +183,61 @@ class LLM:
         if full_system:
             msgs = [{"role": "system", "content": full_system}] + msgs
         
+        # Convert tools to OpenAI format
+        openai_tools = None
+        if tools:
+            openai_tools = [
+                {
+                    "type": "function",
+                    "function": {
+                        "name": t["name"],
+                        "description": t["description"],
+                        "parameters": {
+                            "type": "object",
+                            "properties": {k: {"type": "string", "description": v} for k, v in t.get("params", {}).items()},
+                            "required": list(t.get("params", {}).keys())
+                        }
+                    }
+                }
+                for t in tools
+            ]
+        
         payload = {
             "model": "lfm",
             "messages": msgs,
             "max_tokens": 4096,
         }
+        if openai_tools:
+            payload["tools"] = openai_tools
         
         data = json.dumps(payload).encode('utf-8')
-        req = urllib.request.Request(
-            f"{LFM_URL}/v1/chat/completions",
-            data=data,
-            headers={'Content-Type': 'application/json'}
-        )
         
-        with urllib.request.urlopen(req) as response:
-            result = json.loads(response.read().decode())
+        # Try local first, then remote
+        urls_to_try = [LFM_URL_LOCAL, LFM_URL_REMOTE]
+        # If LFM_URL is explicitly set and different, try it first
+        if LFM_URL not in urls_to_try:
+            urls_to_try.insert(0, LFM_URL)
+        
+        result = None
+        last_error = None
+        for url in urls_to_try:
+            try:
+                req = urllib.request.Request(
+                    f"{url}/v1/chat/completions",
+                    data=data,
+                    headers={'Content-Type': 'application/json'}
+                )
+                with urllib.request.urlopen(req, timeout=120) as response:
+                    result = json.loads(response.read().decode())
+                    print(f"[LFM] Connected to {url}", flush=True)
+                    break  # Success, exit loop
+            except (urllib.error.URLError, urllib.error.HTTPError, TimeoutError) as e:
+                last_error = e
+                print(f"[LFM] {url} unavailable: {e}", flush=True)
+                continue  # Try next URL
+        
+        if result is None:
+            raise ConnectionError(f"All LFM servers unavailable. Last error: {last_error}")
         
         # Parse response
         msg = result["choices"][0]["message"]
