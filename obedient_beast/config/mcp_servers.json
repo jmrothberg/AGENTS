@@ -7,10 +7,11 @@
       "local": true
     },
     "git": {
-      "enabled": true,
+      "enabled": false,
       "command": "npx -y @modelcontextprotocol/server-git --repository /Users/jonathanrothberg/AGENTS/AGENTS",
       "description": "Git operations: commit, diff, log, branch, status",
-      "local": true
+      "local": true,
+      "note": "Disabled - package has startup issues. Beast can use shell tool for git commands."
     },
     "memory": {
       "enabled": true,

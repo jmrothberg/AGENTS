@@ -16,6 +16,7 @@ import makeWASocket, {
     fetchLatestBaileysVersion
 } from '@whiskeysockets/baileys'
 import qrcode from 'qrcode-terminal'
+import fs from 'fs'
 
 // Configuration
 const BEAST_URL = process.env.BEAST_URL || 'http://localhost:5001'
@@ -127,12 +128,22 @@ async function connectToWhatsApp() {
                 
                 const data = await response.json()
                 const reply = data.response
+                const imagePath = data.image
                 
                 if (reply) {
                     console.log(`[Reply] ${reply.substring(0, 100)}...`)
                     
                     // Send reply back to the chat (group or DM)
                     await sock.sendMessage(chatId, { text: reply })
+                }
+                
+                // Send image if provided
+                if (imagePath && fs.existsSync(imagePath)) {
+                    console.log(`[Image] Sending ${imagePath}`)
+                    await sock.sendMessage(chatId, { 
+                        image: fs.readFileSync(imagePath),
+                        caption: 'Screenshot'
+                    })
                 }
                 
             } catch (error) {

@@ -15,7 +15,7 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-from beast import run
+from beast import run, get_and_clear_pending_image
 from llm import get_llm
 
 app = Flask(__name__)
@@ -78,7 +78,15 @@ def message():
     try:
         response = run(text, session_id, llm)
         print(f"[Response] {response[:100]}...")
-        return jsonify({"response": response})
+        
+        # Check if there's an image to send
+        image_path = get_and_clear_pending_image()
+        result = {"response": response}
+        if image_path:
+            result["image"] = image_path
+            print(f"[Image] {image_path}")
+        
+        return jsonify(result)
     
     except Exception as e:
         print(f"[Error] {e}")

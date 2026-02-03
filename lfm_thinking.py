@@ -57,6 +57,7 @@ import queue
 import argparse
 import json
 import uuid
+import re
 
 # Hide tkinter root window
 tk.Tk().withdraw()
@@ -171,14 +172,16 @@ def run_server_mode(model, tokenizer, processor, model_name, model_type, host="0
     # Request/Response models matching OpenAI format
     class ChatMessage(BaseModel):
         role: str
-        content: str
+        content: Union[str, List, None] = None
+        tool_calls: Optional[List[dict]] = None
     
     class ChatCompletionRequest(BaseModel):
         model: str = model_name
         messages: List[ChatMessage]
         temperature: Optional[float] = 0.7
         max_tokens: Optional[int] = 512
-        stream: Optional[bool] = False  # Set to True for streaming responses
+        stream: Optional[bool] = False
+        tools: Optional[List[dict]] = None  # Tool definitions for function calling
     
     class ChatCompletionChoice(BaseModel):
         index: int
@@ -207,6 +210,79 @@ def run_server_mode(model, tokenizer, processor, model_name, model_type, host="0
     class ModelsResponse(BaseModel):
         object: str = "list"
         data: List[ModelInfo]
+    
+    # ----------------------------------------------------------------
+    # Tool Calling Support
+    # ----------------------------------------------------------------
+    def format_tools_for_prompt(tools):
+        """Format tools into a prompt section for the model."""
+        if not tools:
+            return ""
+        
+        tool_text = "\n\n## Available Tools\n"
+        tool_text += "You can call tools by outputting a tool_call block like this:\n"
+        tool_text += "```tool_call\n{\"name\": \"tool_name\", \"arguments\": {\"param\": \"value\"}}\n```\n\n"
+        tool_text += "Available tools:\n"
+        
+        for tool in tools:
+            func = tool.get("function", tool)
+            name = func.get("name", "unknown")
+            desc = func.get("description", "")
+            params = func.get("parameters", {}).get("properties", {})
+            param_names = ", ".join(params.keys())
+            tool_text += f"- **{name}**({param_names}): {desc}\n"
+        
+        tool_text += "\nIf you need to use a tool, output ONLY the tool_call JSON block. Keep responses concise.\n"
+        return tool_text
+
+    def parse_tool_calls(text):
+        """Parse tool calls from model output."""
+        tool_calls = []
+        
+        # Pattern 1: ```tool_call\n{...}\n```
+        pattern1 = r'```tool_call\s*\n?\s*(\{[^}]+\})\s*\n?```'
+        matches = re.findall(pattern1, text, re.DOTALL)
+        
+        # Pattern 2: <tool_call>{...}</tool_call> (Qwen3 native format)
+        pattern2 = r'<tool_call>\s*(\{[^}]+\})\s*</tool_call>'
+        matches += re.findall(pattern2, text, re.DOTALL)
+        
+        # Pattern 3: Raw JSON {"name": "...", "arguments": {...}}
+        pattern3 = r'\{"name":\s*"(\w+)",\s*"arguments":\s*(\{[^}]*\})\}'
+        json_matches = re.findall(pattern3, text)
+        
+        for match in matches:
+            try:
+                data = json.loads(match)
+                tool_calls.append({
+                    "id": f"call_{uuid.uuid4().hex[:8]}",
+                    "type": "function",
+                    "function": {
+                        "name": data.get("name"),
+                        "arguments": json.dumps(data.get("arguments", data.get("args", {})))
+                    }
+                })
+            except json.JSONDecodeError:
+                pass
+        
+        for name, args_str in json_matches:
+            tool_calls.append({
+                "id": f"call_{uuid.uuid4().hex[:8]}",
+                "type": "function",
+                "function": {
+                    "name": name,
+                    "arguments": args_str
+                }
+            })
+        
+        return tool_calls
+
+    def clean_tool_calls_from_text(text):
+        """Remove tool call blocks from text."""
+        text = re.sub(r'```tool_call\s*\n?\s*\{[^}]+\}\s*\n?```', '', text, flags=re.DOTALL)
+        text = re.sub(r'<tool_call>\s*\{[^}]+\}\s*</tool_call>', '', text, flags=re.DOTALL)
+        text = re.sub(r'\{"name":\s*"\w+",\s*"arguments":\s*\{[^}]*\}\}', '', text)
+        return text.strip()
     
     @app.get("/")
     async def root():
@@ -315,17 +391,37 @@ def run_server_mode(model, tokenizer, processor, model_name, model_type, host="0
         OpenAI-compatible chat completions endpoint.
         Works with any OpenAI client library.
         Supports streaming when stream=true.
+        Supports tool calling when tools are provided.
         """
         try:
             # Extract the last user message for simple single-turn
             # (Multi-turn conversation would need more logic)
             user_message = ""
+            system_message = ""
             for msg in request.messages:
                 if msg.role == "user":
-                    user_message = msg.content
+                    content = msg.content
+                    # Handle content as string or list
+                    if isinstance(content, list):
+                        user_message = " ".join(
+                            item.get("text", "") for item in content 
+                            if isinstance(item, dict) and item.get("type") == "text"
+                        )
+                    else:
+                        user_message = content or ""
+                elif msg.role == "system":
+                    system_message = msg.content if isinstance(msg.content, str) else ""
             
             if not user_message:
                 raise HTTPException(status_code=400, detail="No user message found")
+            
+            # Add tool definitions to the prompt if provided
+            tools_prompt = format_tools_for_prompt(request.tools) if request.tools else ""
+            if tools_prompt:
+                if system_message:
+                    system_message = system_message + tools_prompt
+                else:
+                    user_message = tools_prompt + "\n\nUser request: " + user_message
             
             max_tokens = request.max_tokens or 512
             
@@ -399,24 +495,56 @@ def run_server_mode(model, tokenizer, processor, model_name, model_type, host="0
                 )
                 response_text = tokenizer.decode(output[0][input_ids.shape[-1]:], skip_special_tokens=True)
             
+            # Parse tool calls from response if tools were requested
+            tool_calls = []
+            if request.tools:
+                tool_calls = parse_tool_calls(response_text)
+                if tool_calls:
+                    # Clean tool call syntax from the text
+                    response_text = clean_tool_calls_from_text(response_text)
+            
             # Build OpenAI-format response
-            return ChatCompletionResponse(
-                id=f"chatcmpl-{uuid.uuid4().hex[:8]}",
-                created=int(time.time()),
-                model=model_name,
-                choices=[
-                    ChatCompletionChoice(
-                        index=0,
-                        message=ChatMessage(role="assistant", content=response_text),
-                        finish_reason="stop"
+            if tool_calls:
+                # Response with tool calls
+                return {
+                    "id": f"chatcmpl-{uuid.uuid4().hex[:8]}",
+                    "object": "chat.completion",
+                    "created": int(time.time()),
+                    "model": model_name,
+                    "choices": [{
+                        "index": 0,
+                        "message": {
+                            "role": "assistant",
+                            "content": response_text if response_text else None,
+                            "tool_calls": tool_calls
+                        },
+                        "finish_reason": "tool_calls"
+                    }],
+                    "usage": {
+                        "prompt_tokens": len(user_message.split()),
+                        "completion_tokens": len(response_text.split()) if response_text else 0,
+                        "total_tokens": len(user_message.split()) + (len(response_text.split()) if response_text else 0)
+                    }
+                }
+            else:
+                # Regular response without tool calls
+                return ChatCompletionResponse(
+                    id=f"chatcmpl-{uuid.uuid4().hex[:8]}",
+                    created=int(time.time()),
+                    model=model_name,
+                    choices=[
+                        ChatCompletionChoice(
+                            index=0,
+                            message=ChatMessage(role="assistant", content=response_text),
+                            finish_reason="stop"
+                        )
+                    ],
+                    usage=Usage(
+                        prompt_tokens=len(user_message.split()),
+                        completion_tokens=len(response_text.split()),
+                        total_tokens=len(user_message.split()) + len(response_text.split())
                     )
-                ],
-                usage=Usage(
-                    prompt_tokens=len(user_message.split()),  # Approximate
-                    completion_tokens=len(response_text.split()),  # Approximate
-                    total_tokens=len(user_message.split()) + len(response_text.split())
                 )
-            )
             
         except Exception as e:
             raise HTTPException(status_code=500, detail=str(e))

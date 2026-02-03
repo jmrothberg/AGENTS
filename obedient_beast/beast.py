@@ -66,6 +66,21 @@ WORKSPACE = Path(__file__).parent / "workspace"
 SESSIONS_DIR = Path(__file__).parent / "sessions"
 SESSIONS_DIR.mkdir(exist_ok=True)
 
+# Pending image to send with next response (for WhatsApp image sending)
+_pending_image: str = None
+
+def set_pending_image(path: str):
+    """Set an image to be sent with the next response."""
+    global _pending_image
+    _pending_image = path
+
+def get_and_clear_pending_image() -> str:
+    """Get and clear the pending image path."""
+    global _pending_image
+    path = _pending_image
+    _pending_image = None
+    return path
+
 # Load personality from SOUL.md if it exists
 def load_system_prompt() -> str:
     soul_file = WORKSPACE / "SOUL.md"
@@ -147,6 +162,28 @@ TOOLS = [
         "description": "Get the current mouse cursor position.",
         "params": {}
     },
+    # ---------------------------------------------------------------------------
+    # Self-Upgrade Tools (Phase 3) - Beast can add its own skills!
+    # ---------------------------------------------------------------------------
+    {
+        "name": "install_mcp_server",
+        "description": "Install a new MCP server to add new capabilities. Beast can use this to give itself new skills! Common servers: filesystem, git, memory, playwright, puppeteer, sqlite, slack, brave-search.",
+        "params": {
+            "name": "Short name for the server (e.g., 'playwright')",
+            "command": "NPX command to run the server (e.g., 'npx -y @anthropic/mcp-server-playwright')",
+            "description": "What this server does"
+        }
+    },
+    {
+        "name": "list_mcp_servers",
+        "description": "List all configured MCP servers and their status.",
+        "params": {}
+    },
+    {
+        "name": "enable_mcp_server",
+        "description": "Enable or disable an MCP server by name.",
+        "params": {"name": "Server name", "enabled": "true or false"}
+    },
 ]
 
 
@@ -213,7 +250,9 @@ def execute_tool(name: str, args: dict) -> str:
             filepath = screenshot_dir / filename
             with mss.mss() as sct:
                 sct.shot(output=str(filepath))
-            return f"Screenshot saved to {filepath}"
+            # Set as pending image so it gets sent with WhatsApp response
+            set_pending_image(str(filepath))
+            return f"Screenshot saved to {filepath}. Will send via WhatsApp."
         
         elif name == "mouse_click":
             import pyautogui
@@ -251,6 +290,70 @@ def execute_tool(name: str, args: dict) -> str:
             import pyautogui
             x, y = pyautogui.position()
             return f"Mouse position: ({x}, {y})"
+        
+        # ---------------------------------------------------------------------------
+        # Self-Upgrade Tools (Phase 3) - Beast can modify its own capabilities!
+        # ---------------------------------------------------------------------------
+        elif name == "install_mcp_server":
+            config_file = Path(__file__).parent / "config" / "mcp_servers.json"
+            config_file.parent.mkdir(exist_ok=True)
+            
+            # Load existing config
+            if config_file.exists():
+                config = json.loads(config_file.read_text())
+            else:
+                config = {"servers": {}}
+            
+            # Add new server
+            server_name = args["name"]
+            config["servers"][server_name] = {
+                "enabled": True,
+                "command": args["command"],
+                "description": args["description"],
+                "local": True
+            }
+            
+            # Save config
+            config_file.write_text(json.dumps(config, indent=2))
+            
+            return f"Installed MCP server '{server_name}'. Restart Beast to activate. Command: {args['command']}"
+        
+        elif name == "list_mcp_servers":
+            config_file = Path(__file__).parent / "config" / "mcp_servers.json"
+            if not config_file.exists():
+                return "No MCP servers configured. Use install_mcp_server to add one."
+            
+            config = json.loads(config_file.read_text())
+            servers = config.get("servers", {})
+            
+            if not servers:
+                return "No MCP servers configured."
+            
+            result = "MCP Servers:\n"
+            for name, info in servers.items():
+                status = "enabled" if info.get("enabled", True) else "disabled"
+                desc = info.get("description", "No description")
+                result += f"  [{status}] {name}: {desc}\n"
+            
+            return result
+        
+        elif name == "enable_mcp_server":
+            config_file = Path(__file__).parent / "config" / "mcp_servers.json"
+            if not config_file.exists():
+                return "No MCP servers configured."
+            
+            config = json.loads(config_file.read_text())
+            server_name = args["name"]
+            
+            if server_name not in config.get("servers", {}):
+                return f"Server '{server_name}' not found."
+            
+            enabled = args.get("enabled", "true").lower() == "true"
+            config["servers"][server_name]["enabled"] = enabled
+            config_file.write_text(json.dumps(config, indent=2))
+            
+            status = "enabled" if enabled else "disabled"
+            return f"Server '{server_name}' is now {status}. Restart Beast to apply."
         
         # ---------------------------------------------------------------------------
         # MCP Tools (Phase 2) - handled by prefix

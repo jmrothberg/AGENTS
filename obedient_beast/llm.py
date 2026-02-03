@@ -156,40 +156,31 @@ class LLM:
         return LLMResponse(text=text, tool_calls=tool_calls, raw=response.model_dump())
     
     def _lfm(self, messages: list, tools: list, system: str) -> LLMResponse:
-        """Call local LFM server (OpenAI-compatible)."""
+        """Call local LFM server (OpenAI-compatible) with text-based tool calling."""
         import urllib.request
+        import re
+        import uuid
         
-        # Prepend system message if provided
-        msgs = messages.copy()
-        if system:
-            msgs = [{"role": "system", "content": system}] + msgs
-        
-        # Convert tools to OpenAI format (LFM is OpenAI-compatible)
-        openai_tools = None
+        # Build tool description for the prompt (MLX-LM doesn't support tools API)
+        tool_prompt = ""
         if tools:
-            openai_tools = [
-                {
-                    "type": "function",
-                    "function": {
-                        "name": t["name"],
-                        "description": t["description"],
-                        "parameters": {
-                            "type": "object",
-                            "properties": {k: {"type": "string"} for k in t.get("params", {})},
-                            "required": list(t.get("params", {}).keys())
-                        }
-                    }
-                }
-                for t in tools
-            ]
+            tool_prompt = "\n\n## Available Tools\nYou can call tools by outputting JSON in this exact format:\n```tool\n{\"name\": \"tool_name\", \"args\": {\"param\": \"value\"}}\n```\n\nAvailable tools:\n"
+            for t in tools:
+                params = ", ".join(t.get("params", {}).keys())
+                tool_prompt += f"- **{t['name']}**({params}): {t['description']}\n"
+            tool_prompt += "\nIf you need to use a tool, output the tool call JSON. After the tool result, continue your response. Keep responses SHORT."
+        
+        # Prepend system message with tool info
+        msgs = messages.copy()
+        full_system = (system or "") + tool_prompt
+        if full_system:
+            msgs = [{"role": "system", "content": full_system}] + msgs
         
         payload = {
             "model": "lfm",
             "messages": msgs,
             "max_tokens": 4096,
         }
-        if openai_tools:
-            payload["tools"] = openai_tools
         
         data = json.dumps(payload).encode('utf-8')
         req = urllib.request.Request(
@@ -201,11 +192,12 @@ class LLM:
         with urllib.request.urlopen(req) as response:
             result = json.loads(response.read().decode())
         
-        # Parse response (OpenAI format)
+        # Parse response
         msg = result["choices"][0]["message"]
         text = msg.get("content", "") or ""
         tool_calls = []
         
+        # First check for native tool_calls (if server supports it)
         if msg.get("tool_calls"):
             for tc in msg["tool_calls"]:
                 tool_calls.append(ToolCall(
@@ -213,6 +205,43 @@ class LLM:
                     name=tc["function"]["name"],
                     args=json.loads(tc["function"]["arguments"])
                 ))
+        else:
+            # Parse text-based tool calls from model output
+            # Look for ```tool\n{...}\n``` or just {"name": "...", "args": {...}}
+            tool_pattern = r'```tool\s*\n?\s*(\{[^}]+\})\s*\n?```'
+            matches = re.findall(tool_pattern, text, re.DOTALL)
+            
+            # Also try to find raw JSON tool calls
+            if not matches:
+                json_pattern = r'\{"name":\s*"(\w+)",\s*"args":\s*(\{[^}]*\})\}'
+                json_matches = re.findall(json_pattern, text)
+                for name, args_str in json_matches:
+                    try:
+                        args = json.loads(args_str)
+                        tool_calls.append(ToolCall(
+                            id=f"call_{uuid.uuid4().hex[:8]}",
+                            name=name,
+                            args=args
+                        ))
+                    except json.JSONDecodeError:
+                        pass
+            else:
+                for match in matches:
+                    try:
+                        tool_data = json.loads(match)
+                        tool_calls.append(ToolCall(
+                            id=f"call_{uuid.uuid4().hex[:8]}",
+                            name=tool_data["name"],
+                            args=tool_data.get("args", {})
+                        ))
+                    except json.JSONDecodeError:
+                        pass
+            
+            # Clean tool call JSON from the text response
+            if tool_calls:
+                text = re.sub(tool_pattern, '', text)
+                text = re.sub(r'\{"name":\s*"\w+",\s*"args":\s*\{[^}]*\}\}', '', text)
+                text = text.strip()
         
         return LLMResponse(text=text, tool_calls=tool_calls, raw=result)
 
