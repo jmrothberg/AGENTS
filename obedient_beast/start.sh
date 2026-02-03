@@ -3,11 +3,12 @@
 # Obedient Beast - Startup Script
 # =============================================================================
 # Usage:
-#   ./start.sh          - Start both server and WhatsApp bridge
-#   ./start.sh server   - Start only the Python server
-#   ./start.sh whatsapp - Start only the WhatsApp bridge
-#   ./start.sh stop     - Stop all Beast processes
-#   ./start.sh status   - Check if processes are running
+#   ./start.sh              - Start both server and WhatsApp bridge
+#   ./start.sh server       - Start only the Python server
+#   ./start.sh whatsapp     - Start only the WhatsApp bridge
+#   ./start.sh stop         - Stop all Beast processes
+#   ./start.sh status       - Check if processes are running
+#   ./start.sh clear-history - Clear all conversation history
 # =============================================================================
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -111,6 +112,11 @@ case "${1:-all}" in
     status)
         check_status
         ;;
+    clear-history)
+        echo -e "${YELLOW}Clearing conversation history...${NC}"
+        rm -f "$SCRIPT_DIR/sessions/*.jsonl"
+        echo -e "${GREEN}History cleared!${NC}"
+        ;;
     all|"")
         # Start both
         start_server
@@ -124,8 +130,9 @@ case "${1:-all}" in
         echo "WhatsApp: Check terminal for QR code (first time only)"
         echo ""
         echo "Commands:"
-        echo "  ./start.sh stop   - Stop everything"
-        echo "  ./start.sh status - Check if running"
+        echo "  ./start.sh stop          - Stop everything"
+        echo "  ./start.sh status        - Check if running"
+        echo "  ./start.sh clear-history - Clear conversation history"
         echo ""
         echo -e "${YELLOW}Press Ctrl+C to stop both processes${NC}"
         echo ""
@@ -135,7 +142,7 @@ case "${1:-all}" in
         wait
         ;;
     *)
-        echo "Usage: $0 {server|whatsapp|stop|status|all}"
+        echo "Usage: $0 {server|whatsapp|stop|status|clear-history|all}"
         exit 1
         ;;
 esac
