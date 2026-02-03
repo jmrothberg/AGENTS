@@ -111,7 +111,8 @@ async function connectToWhatsApp() {
             
             if (!text) continue  // Skip non-text messages
             
-            console.log(`\n[${isGroup ? 'GROUP' : 'DM'}][${sender}] ${text}`)
+            // Log with chat ID so user can identify which chat to allow
+            console.log(`\n[${isGroup ? 'GROUP' : 'DM'}][${chatId}][${sender}] ${text.substring(0, 50)}...`)
             
             try {
                 // Send to Python server (sender and chat_id used for auth check)
@@ -124,7 +125,7 @@ async function connectToWhatsApp() {
                 if (!response.ok) {
                     // 403 = not authorized, silently ignore
                     if (response.status === 403) {
-                        console.log(`[Blocked] ${sender} not authorized`)
+                        console.log(`[Blocked] chat=${chatId} sender=${sender}`)
                         continue
                     }
                     console.error(`Server error: ${response.status}`)

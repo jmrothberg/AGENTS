@@ -390,6 +390,17 @@ python3 server.py  # Uses LLM_BACKEND from .env
 
 This overrides your `.env` setting just for that session - your main config stays unchanged! Perfect for comparing models safely.
 
+### LFM Single-Tool Mode
+
+Local LLMs (Qwen3, GLM-4, etc.) currently tend to loop on tool calls instead of summarizing results. Beast automatically limits LFM to **one tool call per request**, then forces a text response.
+
+**When local LLMs improve**, edit `beast.py` and set:
+```python
+LFM_SINGLE_TOOL_MODE = False  # Enable multi-tool for LFM
+```
+
+Claude and OpenAI handle multi-tool calls properly and are not affected by this setting.
+
 ## Commands
 
 ```bash

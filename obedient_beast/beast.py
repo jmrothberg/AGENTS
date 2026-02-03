@@ -453,9 +453,34 @@ Just ask me to use any tool or help with tasks!"""
     
     max_turns = 10
     all_tools = get_all_tools()  # Built-in + MCP tools
+    tools_used = False  # Track if we've already used a tool
+    
+    # ---------------------------------------------------------------------------
+    # LFM_SINGLE_TOOL_MODE: Workaround for local LLMs that loop on tool calls
+    # ---------------------------------------------------------------------------
+    # Current local models (Qwen3, GLM-4, etc.) tend to keep calling tools
+    # indefinitely instead of summarizing results. This flag limits them to
+    # one tool call per request, then forces a text response.
+    #
+    # Claude and OpenAI handle multi-tool calls properly, so they're excluded.
+    #
+    # TODO: When local LLMs improve at multi-tool orchestration, set this to False
+    # or make it configurable per-model in .env (e.g., LFM_MULTI_TOOL=true)
+    # ---------------------------------------------------------------------------
+    LFM_SINGLE_TOOL_MODE = True  # Set to False to enable multi-tool for LFM
+    
     for turn in range(max_turns):
+        # Determine which tools to send based on backend and mode
+        if llm.backend == "lfm" and LFM_SINGLE_TOOL_MODE and tools_used:
+            # LFM single-tool mode: Don't send tools after first use
+            # This forces the model to summarize the result instead of looping
+            current_tools = None
+        else:
+            # Claude/OpenAI or LFM multi-tool mode: Always send all tools
+            current_tools = all_tools
+        
         # Call LLM
-        response = llm.chat(history, tools=all_tools, system=SYSTEM_PROMPT)
+        response = llm.chat(history, tools=current_tools, system=SYSTEM_PROMPT)
         
         if response.tool_calls:
             # Execute tools and add results to history
@@ -503,6 +528,9 @@ Just ask me to use any tool or help with tasks!"""
                 
                 history.append(tool_result_msg)
                 save_message(session_id, tool_result_msg)
+            
+            # Mark that tools have been used (for LFM loop prevention)
+            tools_used = True
         
         else:
             # No tool calls - we're done

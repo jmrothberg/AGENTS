@@ -303,74 +303,119 @@ def run_server_mode(model, tokenizer, processor, model_name, model_type, host="0
     # ----------------------------------------------------------------
     # Tool Calling Support
     # ----------------------------------------------------------------
+    # -------------------------------------------------------------------------
+    # Tool Calling Support for Local LLMs
+    # -------------------------------------------------------------------------
+    # Local models don't have native function calling like Claude/OpenAI.
+    # Instead, we inject tool info into the prompt and parse tool calls from
+    # the model's text output using regex patterns.
+    #
+    # Supported formats:
+    #   1. ```tool_call\n{"name": "...", "arguments": {...}}\n```
+    #   2. <tool_call>{"name": "...", "arguments": {...}}</tool_call>
+    #
+    # TODO: When MLX-LM adds native tool support, this can be simplified.
+    # -------------------------------------------------------------------------
+    
     def format_tools_for_prompt(tools):
-        """Format tools into a prompt section for the model."""
+        """
+        Format tools into a CONCISE prompt section for the model.
+        
+        We keep the tool list short to avoid overwhelming the model's context.
+        Priority tools are listed first for better attention.
+        """
         if not tools:
             return ""
         
-        tool_text = "\n\n## Available Tools\n"
-        tool_text += "You can call tools by outputting a tool_call block like this:\n"
-        tool_text += "```tool_call\n{\"name\": \"tool_name\", \"arguments\": {\"param\": \"value\"}}\n```\n\n"
-        tool_text += "Available tools:\n"
+        # Keep only the most useful tools to avoid overwhelming the model
+        priority_tools = [
+            "screenshot", "shell", "read_file", "write_file", "edit_file", "list_dir",
+            "mouse_click", "keyboard_type", "mcp_brave-search_brave_web_search"
+        ]
         
+        tool_list = []
         for tool in tools:
             func = tool.get("function", tool)
             name = func.get("name", "unknown")
-            desc = func.get("description", "")
-            params = func.get("parameters", {}).get("properties", {})
-            param_names = ", ".join(params.keys())
-            tool_text += f"- **{name}**({param_names}): {desc}\n"
+            # Include priority tools first, then limit others
+            if name in priority_tools or len(tool_list) < 15:
+                desc = func.get("description", "")[:50]
+                params = func.get("parameters", {}).get("properties", {})
+                param_names = ", ".join(params.keys())
+                tool_list.append(f"- {name}({param_names}): {desc}")
         
-        tool_text += "\nIf you need to use a tool, output ONLY the tool_call JSON block. Keep responses concise.\n"
+        tool_text = "TOOLS: " + " | ".join([t.split(":")[0].strip("- ") for t in tool_list[:10]])
         return tool_text
 
     def parse_tool_calls(text):
         """Parse tool calls from model output."""
         tool_calls = []
         
-        # Pattern 1: ```tool_call\n{...}\n```
-        pattern1 = r'```tool_call\s*\n?\s*(\{[^}]+\})\s*\n?```'
+        # Pattern 1: ```tool_call\n{...}\n``` - use greedy match for nested braces
+        pattern1 = r'```tool_call\s*\n?\s*(\{.*?\})\s*\n?```'
         matches = re.findall(pattern1, text, re.DOTALL)
         
         # Pattern 2: <tool_call>{...}</tool_call> (Qwen3 native format)
-        pattern2 = r'<tool_call>\s*(\{[^}]+\})\s*</tool_call>'
+        pattern2 = r'<tool_call>\s*(\{.*?\})\s*</tool_call>'
         matches += re.findall(pattern2, text, re.DOTALL)
         
-        # Pattern 3: Raw JSON {"name": "...", "arguments": {...}}
-        pattern3 = r'\{"name":\s*"(\w+)",\s*"arguments":\s*(\{[^}]*\})\}'
-        json_matches = re.findall(pattern3, text)
+        # Pattern 3: Extract JSON between ```tool_call and ``` more robustly
+        pattern3 = r'```tool_call\s*\n([\s\S]*?)\n```'
+        block_matches = re.findall(pattern3, text)
         
-        for match in matches:
-            try:
-                data = json.loads(match)
+        # Try to parse all matches, deduplicate by name+args
+        all_candidates = matches + block_matches
+        seen = set()
+        
+        def add_tool_call(data):
+            """Add tool call if not duplicate."""
+            name = data.get("name")
+            args = json.dumps(data.get("arguments", data.get("args", {})))
+            key = f"{name}:{args}"
+            if key not in seen:
+                seen.add(key)
                 tool_calls.append({
                     "id": f"call_{uuid.uuid4().hex[:8]}",
                     "type": "function",
-                    "function": {
-                        "name": data.get("name"),
-                        "arguments": json.dumps(data.get("arguments", data.get("args", {})))
-                    }
+                    "function": {"name": name, "arguments": args}
                 })
+        
+        for match in all_candidates:
+            match = match.strip()
+            try:
+                data = json.loads(match)
+                if "name" in data:
+                    add_tool_call(data)
             except json.JSONDecodeError:
-                pass
+                # Try to extract JSON with brace matching
+                try:
+                    start = match.find('{')
+                    if start >= 0:
+                        depth = 0
+                        for i, c in enumerate(match[start:]):
+                            if c == '{':
+                                depth += 1
+                            elif c == '}':
+                                depth -= 1
+                                if depth == 0:
+                                    data = json.loads(match[start:start+i+1])
+                                    if "name" in data:
+                                        add_tool_call(data)
+                                    break
+                except:
+                    pass
         
-        for name, args_str in json_matches:
-            tool_calls.append({
-                "id": f"call_{uuid.uuid4().hex[:8]}",
-                "type": "function",
-                "function": {
-                    "name": name,
-                    "arguments": args_str
-                }
-            })
-        
-        return tool_calls
+        # Only return first tool call to prevent loops
+        return tool_calls[:1]
 
     def clean_tool_calls_from_text(text):
-        """Remove tool call blocks from text."""
-        text = re.sub(r'```tool_call\s*\n?\s*\{[^}]+\}\s*\n?```', '', text, flags=re.DOTALL)
-        text = re.sub(r'<tool_call>\s*\{[^}]+\}\s*</tool_call>', '', text, flags=re.DOTALL)
-        text = re.sub(r'\{"name":\s*"\w+",\s*"arguments":\s*\{[^}]*\}\}', '', text)
+        """Remove tool call blocks and thinking tags from text."""
+        # Remove ```tool_call blocks
+        text = re.sub(r'```tool_call\s*\n[\s\S]*?\n```', '', text)
+        # Remove <tool_call> blocks
+        text = re.sub(r'<tool_call>[\s\S]*?</tool_call>', '', text)
+        # Remove <think> blocks (Qwen thinking)
+        text = re.sub(r'<think>[\s\S]*?</think>', '', text)
         return text.strip()
     
     @app.get("/")
@@ -483,34 +528,66 @@ def run_server_mode(model, tokenizer, processor, model_name, model_type, host="0
         Supports tool calling when tools are provided.
         """
         try:
-            # Extract the last user message for simple single-turn
-            # (Multi-turn conversation would need more logic)
-            user_message = ""
+            # ---------------------------------------------------------------
+            # Conversation History Handling
+            # ---------------------------------------------------------------
+            # Beast sends multi-turn conversations including:
+            #   - user: Original request
+            #   - assistant: Tool call (if any)
+            #   - tool: Result from tool execution
+            #
+            # We flatten this into a text conversation the model can understand,
+            # since local models don't have native tool result handling.
+            # ---------------------------------------------------------------
             system_message = ""
+            conversation_parts = []
+            
             for msg in request.messages:
-                if msg.role == "user":
-                    content = msg.content
-                    # Handle content as string or list
-                    if isinstance(content, list):
-                        user_message = " ".join(
-                            item.get("text", "") for item in content 
-                            if isinstance(item, dict) and item.get("type") == "text"
-                        )
-                    else:
-                        user_message = content or ""
-                elif msg.role == "system":
-                    system_message = msg.content if isinstance(msg.content, str) else ""
+                content = msg.content
+                # Handle content as string or list
+                if isinstance(content, list):
+                    text_content = " ".join(
+                        item.get("text", "") if isinstance(item, dict) else str(item)
+                        for item in content 
+                        if isinstance(item, dict) and item.get("type") in ["text", "tool_result"]
+                    )
+                else:
+                    text_content = content or ""
+                
+                if msg.role == "system":
+                    system_message = text_content
+                elif msg.role == "user":
+                    conversation_parts.append(f"User: {text_content}")
+                elif msg.role == "assistant":
+                    if text_content:
+                        conversation_parts.append(f"Assistant: {text_content}")
+                elif msg.role == "tool":
+                    # Tool results - format clearly for the model
+                    conversation_parts.append(f"[Tool Result]: {text_content}")
+            
+            # Build the user message from conversation (last few turns)
+            user_message = "\n".join(conversation_parts[-6:]) if conversation_parts else ""
+            
+            # If there's a tool result, add instruction to summarize
+            if "[Tool Result]:" in user_message:
+                user_message += "\n\nNow summarize this result for the user in a helpful way."
             
             if not user_message:
                 raise HTTPException(status_code=400, detail="No user message found")
             
             # Add tool definitions to the prompt if provided
             tools_prompt = format_tools_for_prompt(request.tools) if request.tools else ""
+            print(f"[DEBUG] Tools received: {len(request.tools) if request.tools else 0}")
             if tools_prompt:
-                if system_message:
-                    system_message = system_message + tools_prompt
-                else:
-                    user_message = tools_prompt + "\n\nUser request: " + user_message
+                print(f"[DEBUG] Tools prompt added ({len(tools_prompt)} chars)")
+                # Put tool instruction AFTER user request for better attention
+                tool_instruction = (
+                    f"\n\n{tools_prompt}\n"
+                    "To use a tool, respond ONLY with: ```tool_call\n{\"name\": \"TOOL_NAME\", \"arguments\": {}}\n```\n"
+                    "Example for web search: ```tool_call\n{\"name\": \"mcp_brave-search_brave_web_search\", \"arguments\": {\"query\": \"intel stock price\"}}\n```\n"
+                    "DO NOT explain. Just output the tool_call block."
+                )
+                user_message = user_message + tool_instruction
             
             max_tokens = request.max_tokens or 512
             
@@ -537,14 +614,19 @@ def run_server_mode(model, tokenizer, processor, model_name, model_type, host="0
             # ----------------------------------------------------------------
             # Generate response based on platform and model type
             if IS_MACOS and MLX_LM_AVAILABLE and model_type == "text":
-                # MLX text model
-                messages = [{"role": "user", "content": user_message}]
+                # MLX text model - include system message if present
+                messages = []
+                if system_message:
+                    messages.append({"role": "system", "content": system_message})
+                messages.append({"role": "user", "content": user_message})
+                
                 if tokenizer.chat_template is not None:
                     prompt = tokenizer.apply_chat_template(
                         messages, add_generation_prompt=True, return_dict=False,
                     )
                 else:
-                    prompt = user_message
+                    # Fallback: concatenate system + user
+                    prompt = (system_message + "\n\n" if system_message else "") + user_message
                 
                 response_text = lm_generate(
                     model, tokenizer, prompt=prompt, 
@@ -586,8 +668,12 @@ def run_server_mode(model, tokenizer, processor, model_name, model_type, host="0
             
             # Parse tool calls from response if tools were requested
             tool_calls = []
+            print(f"[DEBUG] Full response:\n{response_text[:500] if response_text else 'empty'}")
             if request.tools:
                 tool_calls = parse_tool_calls(response_text)
+                print(f"[DEBUG] Tool calls found: {len(tool_calls)}")
+                if tool_calls:
+                    print(f"[DEBUG] Parsed tool: {tool_calls[0]}")
                 if tool_calls:
                     # Clean tool call syntax from the text
                     response_text = clean_tool_calls_from_text(response_text)
