@@ -17,16 +17,80 @@ import makeWASocket, {
 } from '@whiskeysockets/baileys'
 import qrcode from 'qrcode-terminal'
 import fs from 'fs'
+import path from 'path'
+import os from 'os'
 
 // Configuration
 const BEAST_URL = process.env.BEAST_URL || 'http://localhost:5001'
+const AUTH_DIR = 'auth_info'
+const BACKUP_DIR = path.join(os.homedir(), '.beast_whatsapp_backup')
 
 // Store for pending responses
 let sock = null
 
+// ---------------------------------------------------------------------------
+// Auto-Backup/Restore for WhatsApp credentials
+// ---------------------------------------------------------------------------
+// Automatically backs up auth_info after successful connection and
+// restores from backup if auth_info is missing. No manual steps needed!
+// ---------------------------------------------------------------------------
+
+function backupAuth() {
+    if (!fs.existsSync(AUTH_DIR)) return
+    
+    try {
+        // Create backup directory if needed
+        if (!fs.existsSync(BACKUP_DIR)) {
+            fs.mkdirSync(BACKUP_DIR, { recursive: true })
+        }
+        
+        // Copy all files from auth_info to backup
+        const files = fs.readdirSync(AUTH_DIR)
+        for (const file of files) {
+            fs.copyFileSync(
+                path.join(AUTH_DIR, file),
+                path.join(BACKUP_DIR, file)
+            )
+        }
+        console.log(`📦 Auth backed up to ${BACKUP_DIR}`)
+    } catch (err) {
+        console.error('Backup failed:', err.message)
+    }
+}
+
+function restoreAuth() {
+    // Only restore if auth_info is missing but backup exists
+    if (fs.existsSync(AUTH_DIR) && fs.readdirSync(AUTH_DIR).length > 0) return false
+    if (!fs.existsSync(BACKUP_DIR)) return false
+    
+    try {
+        // Create auth_info if needed
+        if (!fs.existsSync(AUTH_DIR)) {
+            fs.mkdirSync(AUTH_DIR, { recursive: true })
+        }
+        
+        // Copy all files from backup to auth_info
+        const files = fs.readdirSync(BACKUP_DIR)
+        for (const file of files) {
+            fs.copyFileSync(
+                path.join(BACKUP_DIR, file),
+                path.join(AUTH_DIR, file)
+            )
+        }
+        console.log(`✅ Auth restored from backup!`)
+        return true
+    } catch (err) {
+        console.error('Restore failed:', err.message)
+        return false
+    }
+}
+
 async function connectToWhatsApp() {
+    // Try to restore from backup if auth_info is missing
+    restoreAuth()
+    
     // Load auth state (persisted across restarts)
-    const { state, saveCreds } = await useMultiFileAuthState('auth_info')
+    const { state, saveCreds } = await useMultiFileAuthState(AUTH_DIR)
     
     // Get latest Baileys version
     const { version } = await fetchLatestBaileysVersion()
@@ -66,6 +130,9 @@ async function connectToWhatsApp() {
         if (connection === 'open') {
             console.log('✅ Connected to WhatsApp!')
             console.log(`🐺 Obedient Beast ready. Forwarding to ${BEAST_URL}`)
+            
+            // Auto-backup credentials after successful connection
+            setTimeout(backupAuth, 2000)  // Wait for creds to be saved first
         }
     })
     
