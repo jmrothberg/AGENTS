@@ -450,20 +450,48 @@ Send these messages to Beast via WhatsApp:
 3. Scan the QR code with WhatsApp (Settings → Linked Devices)
 4. Message yourself or create a solo group to chat with Beast
 
-### Protecting Your WhatsApp Session
+### WhatsApp Credentials & Backup
 
-Your WhatsApp credentials are stored in `obedient_beast/whatsapp/auth_info/`. This folder is gitignored (won't be uploaded to GitHub).
+Your WhatsApp session is stored in two places:
 
-**To avoid re-scanning QR codes:**
-```bash
-# Backup your session (do this after first successful connection)
-cp -r obedient_beast/whatsapp/auth_info ~/whatsapp_auth_backup
+| Location | Purpose |
+|----------|---------|
+| `obedient_beast/whatsapp/auth_info/` | Active credentials (gitignored) |
+| `~/.beast_whatsapp_backup/` | Auto-backup (in your home folder) |
 
-# Restore if needed
-cp -r ~/whatsapp_auth_backup obedient_beast/whatsapp/auth_info
-```
+**Auto-backup**: After each successful connection, Beast automatically backs up your credentials to `~/.beast_whatsapp_backup/`. If `auth_info/` is deleted, it auto-restores on next startup.
 
 **"Try again later" error?** WhatsApp rate-limits device linking. Wait 10-15 minutes.
+
+### Moving Beast to Another Machine
+
+To run Beast on a new computer without re-scanning the QR code:
+
+**1. Copy these files from your current machine:**
+```bash
+# Your configuration (API keys, settings)
+scp ~/.env user@new-machine:/path/to/AGENTS/.env
+
+# WhatsApp credentials (pick one):
+scp -r ~/.beast_whatsapp_backup user@new-machine:~/
+# OR
+scp -r obedient_beast/whatsapp/auth_info user@new-machine:/path/to/AGENTS/obedient_beast/whatsapp/
+```
+
+**2. On the new machine:**
+```bash
+git clone https://github.com/jmrothberg/AGENTS.git
+cd AGENTS/obedient_beast
+./setup.sh
+./start.sh  # No QR scan needed - credentials auto-restore!
+```
+
+**Full paths on macOS:**
+```
+~/.env                              → /Users/YOUR_USERNAME/.env
+~/.beast_whatsapp_backup/           → /Users/YOUR_USERNAME/.beast_whatsapp_backup/
+obedient_beast/whatsapp/auth_info/  → Inside the AGENTS repo
+```
 
 ### WhatsApp Security
 
