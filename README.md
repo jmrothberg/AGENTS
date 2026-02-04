@@ -450,6 +450,21 @@ Send these messages to Beast via WhatsApp:
 3. Scan the QR code with WhatsApp (Settings → Linked Devices)
 4. Message yourself or create a solo group to chat with Beast
 
+### Protecting Your WhatsApp Session
+
+Your WhatsApp credentials are stored in `obedient_beast/whatsapp/auth_info/`. This folder is gitignored (won't be uploaded to GitHub).
+
+**To avoid re-scanning QR codes:**
+```bash
+# Backup your session (do this after first successful connection)
+cp -r obedient_beast/whatsapp/auth_info ~/whatsapp_auth_backup
+
+# Restore if needed
+cp -r ~/whatsapp_auth_backup obedient_beast/whatsapp/auth_info
+```
+
+**"Try again later" error?** WhatsApp rate-limits device linking. Wait 10-15 minutes.
+
 ### WhatsApp Security
 
 - Beast uses YOUR WhatsApp account (not a separate bot)
