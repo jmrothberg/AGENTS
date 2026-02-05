@@ -355,6 +355,10 @@ def run_server_mode(model, tokenizer, processor, model_name, model_type, host="0
         pattern1 = r'```tool_call\s*\n?\s*(\{.*?\})\s*\n?```'
         matches = re.findall(pattern1, text, re.DOTALL)
         
+        # Pattern 1b: ```tool\n{...}\n``` - GLM Flash uses this shorter variant
+        pattern1b = r'```tool\s*\n?\s*(\{.*?\})\s*\n?```'
+        matches += re.findall(pattern1b, text, re.DOTALL)
+        
         # Pattern 2: <tool_call>{...}</tool_call> (Qwen3 native format)
         pattern2 = r'<tool_call>\s*(\{.*?\})\s*</tool_call>'
         matches += re.findall(pattern2, text, re.DOTALL)
@@ -362,6 +366,10 @@ def run_server_mode(model, tokenizer, processor, model_name, model_type, host="0
         # Pattern 3: Extract JSON between ```tool_call and ``` more robustly
         pattern3 = r'```tool_call\s*\n([\s\S]*?)\n```'
         block_matches = re.findall(pattern3, text)
+        
+        # Pattern 3b: Also match ```tool variant for GLM Flash
+        pattern3b = r'```tool\s*\n([\s\S]*?)\n```'
+        block_matches += re.findall(pattern3b, text)
         
         # Try to parse all matches, deduplicate by name+args
         all_candidates = matches + block_matches
@@ -412,6 +420,8 @@ def run_server_mode(model, tokenizer, processor, model_name, model_type, host="0
         """Remove tool call blocks and thinking tags from text."""
         # Remove ```tool_call blocks
         text = re.sub(r'```tool_call\s*\n[\s\S]*?\n```', '', text)
+        # Remove ```tool blocks (GLM Flash variant)
+        text = re.sub(r'```tool\s*\n[\s\S]*?\n```', '', text)
         # Remove <tool_call> blocks
         text = re.sub(r'<tool_call>[\s\S]*?</tool_call>', '', text)
         # Remove <think> blocks (Qwen thinking)
