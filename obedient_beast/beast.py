@@ -620,7 +620,6 @@ LFM = LITE (2 tool calls, minimal memory). Switch anytime with /claude /lfm."""
 
     # --- /claude, /openai, /lfm - switch backend (works from WhatsApp AND CLI) ---
     if cmd in ["/claude", "/openai", "/lfm"]:
-        global _backend_override
         new_backend = cmd.lstrip("/")
         _backend_override = new_backend
         os.environ["LLM_BACKEND_TEST"] = new_backend
