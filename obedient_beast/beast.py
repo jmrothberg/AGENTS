@@ -69,6 +69,9 @@ SESSIONS_DIR.mkdir(exist_ok=True)
 # Pending image to send with next response (for WhatsApp image sending)
 _pending_image: str = None
 
+# Backend override — set via /claude /openai /lfm commands (persists across calls)
+_backend_override: str = None
+
 def set_pending_image(path: str):
     """Set an image to be sent with the next response."""
     global _pending_image
@@ -517,7 +520,11 @@ def run(user_input: str, session_id: str = "default", llm=None) -> str:
     Run the agent loop: call LLM, execute tools, repeat until done.
     Returns the final text response.
     """
-    if llm is None:
+    # Apply backend override if set (from /claude /openai /lfm commands)
+    global _backend_override
+    if _backend_override:
+        llm = get_llm(_backend_override)
+    elif llm is None:
         llm = get_llm()
 
     # Handle slash commands before LLM processing
@@ -541,27 +548,56 @@ def run(user_input: str, session_id: str = "default", llm=None) -> str:
         return "\n".join(tool_list)
 
     if user_input.strip().lower() == "/help":
-        return """🐺 **Obedient Beast Commands:**
+        return """🐺 **Beast Commands:**
+• `/status` - Task queue & current backend
+• `/claude` `/openai` `/lfm` - Switch backend
+• `/clear` - Clear history
+• `/tools` - List tools
+• `/more` - Full help with examples
 
-**Management:**
-• `/help` - Show this help message
+**Quick tips:** Just talk to me! Say "remind me to..." to queue a task."""
+
+    if user_input.strip().lower() == "/more":
+        return """🐺 **Obedient Beast — Full Help**
+
+**Commands:**
+• `/help` - Quick help
+• `/status` - Show task queue, current backend & tier
+• `/claude` - Switch to Claude (FULL tier, 10 tool calls)
+• `/openai` - Switch to OpenAI (FULL tier, 10 tool calls)
+• `/lfm` - Switch to local LFM (LITE tier, 2 tool calls)
 • `/clear` - Clear all conversation history
 • `/tools` - List all available tools
-• `/status` - Show task queue and current tier
 
-**Backend Switching (CLI only):**
-• `/claude` - Switch to Claude backend (FULL tier)
-• `/openai` - Switch to OpenAI backend (FULL tier)
-• `/lfm` - Switch to local LFM backend (LITE tier)
+**Task Queue — say things like:**
+• "remind me to check disk space"
+• "add a task to organize my downloads"
+• "later, review the log files"
+Beast queues these for autonomous processing.
 
-**Tools Available:**
-• File operations (read/write/edit/list)
-• Computer control (screenshot, mouse, keyboard)
-• Terminal/shell commands
-• Task queue (add_task, recall_memory)
-• Web search (with MCP enabled)
+**Tools — just ask:**
+• "take a screenshot" → screenshot tool
+• "list files in ~/Documents" → list_dir tool
+• "run ls -la" → shell tool
+• "what do you remember about X?" → recall_memory tool
 
-Just ask me to use any tool or help with tasks!"""
+**Autonomous mode (separate terminal):**
+Run `python heartbeat.py` — Beast processes queued tasks on a timer.
+
+**Tiers:** Claude/OpenAI = FULL (10 tool calls, rich memory). LFM = LITE (2 tool calls, minimal memory). Auto-switches with /claude /lfm."""
+
+    # /claude, /openai, /lfm - switch backend (works from WhatsApp AND CLI)
+    if user_input.strip().lower() in ["/claude", "/openai", "/lfm"]:
+        global _backend_override
+        new_backend = user_input.strip().lower().lstrip("/")
+        _backend_override = new_backend
+        os.environ["LLM_BACKEND_TEST"] = new_backend
+        # Reload capabilities for the new backend tier
+        import importlib
+        import capabilities
+        importlib.reload(capabilities)
+        from capabilities import TIER_LABEL as new_tier, MAX_TOOL_TURNS as new_max
+        return f"🔄 Switched to **{new_backend}** backend. Tier: {new_tier} (max {new_max} tool turns)"
 
     # /status - Show task queue and capability tier (works from CLI and WhatsApp)
     if user_input.strip().lower() == "/status":
@@ -700,7 +736,7 @@ def cli():
     if MCP_ENABLED:
         print(f"   MCP: enabled")
     print("=" * 60)
-    print("Commands: /help, /status, /new, /clear, /quit, /tools, /claude, /openai, /lfm")
+    print("Commands: /help, /more, /status, /new, /clear, /quit, /tools, /claude, /openai, /lfm")
     print("=" * 60 + "\n")
     
     session_id = f"cli_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
@@ -729,20 +765,6 @@ def cli():
                     prefix = "[MCP] " if t["name"].startswith("mcp_") else ""
                     print(f"  {prefix}{t['name']}: {t['description'][:60]}...")
                 print()
-                continue
-            
-            # /claude, /openai, /lfm - switch LLM backend on the fly
-            if user_input.lower() in ["/claude", "/openai", "/lfm"]:
-                new_backend = user_input.lower().lstrip("/")
-                llm = get_llm(new_backend)
-                # Reload capabilities for the new backend tier
-                import capabilities
-                os.environ["LLM_BACKEND_TEST"] = new_backend
-                # Force capabilities module to re-evaluate tier
-                import importlib
-                importlib.reload(capabilities)
-                from capabilities import TIER_LABEL as new_tier, MAX_TOOL_TURNS as new_max
-                print(f"Switched to {new_backend} backend. Tier: {new_tier} (max {new_max} tool turns)\n")
                 continue
             
             print("Beast: ", end="", flush=True)
