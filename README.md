@@ -272,21 +272,25 @@ That's it. The script:
 
 Then just:
 ```bash
-./start.sh   # Start the agent
+./start.sh   # Opens 4 Terminal windows — everything running at once
 ```
 
-## Two Ways to Use Beast
+## How Beast Runs
 
-Beast has two modes. **Pick whichever you need:**
+`./start.sh` opens **4 separate Terminal windows** so you can see everything:
 
-| Mode | How to Start | What It Does |
-|------|-------------|--------------|
-| **WhatsApp mode** | `./start.sh` | Starts HTTP server + WhatsApp bridge. Message Beast from your phone 24/7. This is your normal workflow. |
-| **CLI mode** | `python beast.py` | Direct terminal chat. Type messages, Beast responds. Supports `/claude`, `/openai`, `/lfm` to switch backends on the fly. Great for testing and local use. |
+| Window | What's in it |
+|--------|-------------|
+| 🖥 **Server** | HTTP API that receives WhatsApp messages |
+| 📱 **WhatsApp** | Bridge to your phone (Baileys) |
+| 🫀 **Heartbeat** | Autonomous task processor (works on queued tasks by itself) |
+| 🐺 **CLI** | Direct terminal chat — type to Beast without your phone |
 
-Both modes use the same agent loop (`beast.run()`), same tools, same everything. The only difference is how messages get in and out.
+Works on **macOS** (Terminal.app) and **Ubuntu** (gnome-terminal). Each process has its own window, its own scroll, easy to read.
 
-**You can also run both at the same time** — WhatsApp mode in the background and CLI in a terminal.
+All four share the same agent loop, same tools, same everything. Stop all with `./start.sh stop`.
+
+You can also start any one individually: `./start.sh server`, `./start.sh cli`, etc.
 
 ## Architecture
 
@@ -325,7 +329,7 @@ Both modes use the same agent loop (`beast.run()`), same tools, same everything.
 | File | Description |
 |------|-------------|
 | `setup.sh` | **One-command setup** - run this first |
-| `start.sh` | Start/stop the agent (WhatsApp mode) |
+| `start.sh` | Opens 4 Terminal windows (server, WhatsApp, heartbeat, CLI) |
 | `beast.py` | Agent loop + 17 built-in tools + CLI mode |
 | `llm.py` | Unified LLM client (LFM/OpenAI/Claude) |
 | `capabilities.py` | Tiered settings (FULL for Claude/OpenAI, LITE for local LFM) |
@@ -440,57 +444,50 @@ Claude and OpenAI handle multi-tool calls properly and get the full tier automat
 ./setup.sh --no-node    # Skip WhatsApp (Python only)
 ./setup.sh --check      # Verify requirements
 
-# Running — WhatsApp mode (your normal workflow)
-./start.sh              # Start server + WhatsApp
+# Running — all 4 windows at once (your normal workflow)
+./start.sh              # Opens 4 Terminal windows: server, WhatsApp, heartbeat, CLI
 ./start.sh stop         # Stop everything
-./start.sh status       # Check if running
-./start.sh server       # Python server only
-./start.sh whatsapp     # WhatsApp bridge only
+./start.sh status       # Check what's running
 
-# Running — CLI mode (direct terminal chat)
-python3 beast.py        # Interactive chat with Beast in your terminal
-                        # Supports /claude /openai /lfm to switch backends
-
-# Running — Autonomous mode (Beast works by itself)
-python3 heartbeat.py          # Process task queue on a timer (Ctrl+C to stop)
-python3 heartbeat.py --once   # Process one cycle and exit
-python3 heartbeat.py --status # Show task queue
+# Running — individual processes (one per terminal)
+./start.sh server       # Just the HTTP server
+./start.sh whatsapp     # Just the WhatsApp bridge
+./start.sh heartbeat    # Just the heartbeat (autonomous tasks)
+./start.sh cli          # Just the CLI (direct terminal chat)
 
 # Management
 ./start.sh clear-history  # Clear all conversations
-./clear_history.sh        # Quick history clear (standalone)
 ```
 
-## CLI Commands
-
-Start CLI mode: `python beast.py` (in the `obedient_beast/` folder)
+## Slash Commands (work in both WhatsApp and CLI)
 
 | Command | What it does |
 |---------|-------------|
-| `/help` | Show help and all commands |
-| `/tools` | List all available tools |
-| `/status` | Show task queue, current tier, and settings |
-| `/new` | Reset conversation (start fresh) |
-| `/clear` | Clear all conversation history |
+| `/help` | Quick help with top commands |
+| `/more` | Full detailed help with examples |
+| `/status` | Show backend, tier, heartbeat state, task summary |
+| `/tasks` | List all tasks with status |
+| `/done 3` | Mark task #3 as done |
+| `/drop 3` | Remove task #3 |
 | `/claude` | Switch to Claude backend (FULL tier) |
 | `/openai` | Switch to OpenAI backend (FULL tier) |
 | `/lfm` | Switch to local LFM backend (LITE tier) |
-| `/quit` | Exit |
+| `/heartbeat on` | Enable background task processing |
+| `/heartbeat off` | Pause background task processing |
+| `/heartbeat` | Show heartbeat status |
+| `/clear` | Clear chat history only |
+| `/clear tasks` | Clear task queue only |
+| `/clear all` | Clear everything |
+| `/tools` | List all available tools |
 
-**Backend switching** (`/claude`, `/openai`, `/lfm`) changes the LLM on the fly without restarting. The capability tier (tool limits, memory detail, etc.) updates automatically.
-
-## WhatsApp Commands
-
-Send these messages to Beast via WhatsApp:
+**CLI-only commands:**
 
 | Command | What it does |
 |---------|-------------|
-| `/help` | Show help and all commands |
-| `/tools` | List all available tools |
-| `/status` | Show task queue and current tier |
-| `/clear` | Clear all conversation history |
+| `/new` | Reset conversation (start fresh session) |
+| `/quit` | Exit CLI |
 
-**Note**: `/claude`, `/openai`, `/lfm` backend switching is **CLI only** — WhatsApp uses whatever `LLM_BACKEND` is set in `.env`.
+All backend switching, task management, and heartbeat control works from **both WhatsApp and CLI**.
 
 ## Task Queue — How to Add Tasks
 
@@ -532,15 +529,12 @@ When Beast runs autonomously, it can add follow-up tasks to its own queue.
 
 Beast can work on tasks **by itself** on a timer, without you sending messages.
 
+**The heartbeat starts automatically with `./start.sh`** (it gets its own Terminal window). You can also run it standalone:
+
 ```bash
-# Start the heartbeat (runs until you Ctrl+C)
-python heartbeat.py
-
-# Process one cycle and exit
-python heartbeat.py --once
-
-# Check task queue status
-python heartbeat.py --status
+python heartbeat.py              # Run heartbeat loop (Ctrl+C to stop)
+python heartbeat.py --once       # Process one cycle and exit
+python heartbeat.py --status     # Show task queue
 ```
 
 **How it works:**
@@ -550,7 +544,10 @@ python heartbeat.py --status
 4. Beast processes it (using tools as needed) and marks it done/failed
 5. Goes back to sleep
 
-**Tip**: Run the heartbeat in a separate terminal alongside `./start.sh` so Beast handles WhatsApp AND autonomous tasks at the same time.
+**Control from WhatsApp or CLI:**
+- `/heartbeat on` — enable processing
+- `/heartbeat off` — pause processing (heartbeat stays running but skips tasks)
+- `/heartbeat` — check if it's on or off
 
 ## Capability Tiers
 

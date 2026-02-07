@@ -2,11 +2,18 @@
 """
 Obedient Beast - CLI + Agent Loop + Tools
 ==========================================
-A minimal agentic assistant with tool calling.
+A minimal agentic assistant with tool calling, autonomous task queue,
+persistent memory, and tiered capabilities (FULL for Claude/OpenAI,
+LITE for local LFM).
 
 Usage:
-    python beast.py              # Interactive CLI mode
-    LLM_BACKEND=openai python beast.py  # Use OpenAI instead of Claude
+    python beast.py                     # Interactive CLI mode
+    ./start.sh                          # 4 Terminal windows (server, WhatsApp, heartbeat, CLI)
+
+Slash commands (work from CLI and WhatsApp):
+    /help, /more, /status, /tasks, /done <id>, /drop <id>,
+    /claude, /openai, /lfm, /heartbeat on|off,
+    /clear, /clear tasks, /clear all, /tools
 """
 
 import os
