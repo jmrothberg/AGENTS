@@ -249,11 +249,13 @@ Tested on NVIDIA Blackwell GPUs (DGX Spark). The scripts include Blackwell-speci
 **A powerful, MCP-native AI agent with computer control and WhatsApp integration.**
 
 Obedient Beast is a personal AI assistant designed to be **better than OpenClaw** with:
-- **12 built-in tools** including screenshot, mouse, and keyboard control
+- **17 built-in tools** including screenshot, mouse, keyboard, task queue, and memory recall
 - **MCP support** - connect ANY Model Context Protocol server
 - **WhatsApp integration** - message your agent 24/7
-- **Local-first** - your data stays on your machine
-- **Multiple LLM backends** - LFM (local), OpenAI, or Claude
+- **Autonomous heartbeat** - Beast can work on tasks by itself on a timer
+- **Local-first** - your data stays on your machine, no internet needed except when you ask
+- **Multiple LLM backends** - LFM (local), OpenAI, or Claude — switch on the fly
+- **Tiered capabilities** - full power on Claude/OpenAI, restricted on local LFM
 
 ## One-Command Setup
 
@@ -272,6 +274,19 @@ Then just:
 ```bash
 ./start.sh   # Start the agent
 ```
+
+## Two Ways to Use Beast
+
+Beast has two modes. **Pick whichever you need:**
+
+| Mode | How to Start | What It Does |
+|------|-------------|--------------|
+| **WhatsApp mode** | `./start.sh` | Starts HTTP server + WhatsApp bridge. Message Beast from your phone 24/7. This is your normal workflow. |
+| **CLI mode** | `python beast.py` | Direct terminal chat. Type messages, Beast responds. Supports `/claude`, `/openai`, `/lfm` to switch backends on the fly. Great for testing and local use. |
+
+Both modes use the same agent loop (`beast.run()`), same tools, same everything. The only difference is how messages get in and out.
+
+**You can also run both at the same time** — WhatsApp mode in the background and CLI in a terminal.
 
 ## Architecture
 
@@ -300,7 +315,9 @@ Then just:
    • read_file       • mouse_click      • git
    • write_file      • mouse_move       • memory
    • edit_file       • keyboard_type    • (any MCP)
-   • list_dir        • keyboard_hotkey  
+   • list_dir        • keyboard_hotkey
+   • add_task        • get_screen_size
+   • recall_memory   • get_mouse_pos
 ```
 
 ## Files
@@ -308,16 +325,20 @@ Then just:
 | File | Description |
 |------|-------------|
 | `setup.sh` | **One-command setup** - run this first |
-| `start.sh` | Start/stop the agent |
-| `beast.py` | Agent loop + 12 built-in tools |
+| `start.sh` | Start/stop the agent (WhatsApp mode) |
+| `beast.py` | Agent loop + 17 built-in tools + CLI mode |
 | `llm.py` | Unified LLM client (LFM/OpenAI/Claude) |
+| `capabilities.py` | Tiered settings (FULL for Claude/OpenAI, LITE for local LFM) |
+| `heartbeat.py` | Autonomous task scheduler (processes task queue on a timer) |
 | `mcp_client.py` | MCP server connection manager |
 | `server.py` | Flask HTTP server for WhatsApp |
 | `config/mcp_servers.json` | MCP server configuration |
 | `whatsapp/bridge.js` | Baileys WhatsApp connector |
 | `workspace/SOUL.md` | Agent personality |
+| `workspace/AGENTS.md` | Standing goals, reasoning templates, task guidance |
+| `workspace/tasks.json` | Task queue for autonomous work |
 
-## Built-in Tools (12 total)
+## Built-in Tools (17 total)
 
 ### File & System Tools
 | Tool | Description |
@@ -338,6 +359,19 @@ Then just:
 | `keyboard_hotkey` | Press shortcuts (cmd+c, etc) |
 | `get_screen_size` | Get screen dimensions |
 | `get_mouse_position` | Get cursor position |
+
+### Self-Upgrade Tools
+| Tool | Description |
+|------|-------------|
+| `install_mcp_server` | Add new MCP server capabilities |
+| `list_mcp_servers` | Show configured MCP servers |
+| `enable_mcp_server` | Enable/disable an MCP server |
+
+### Autonomous Agent Tools
+| Tool | Description |
+|------|-------------|
+| `add_task` | Add/update/complete tasks in the queue |
+| `recall_memory` | Search persistent memory for past context |
 
 ## MCP Tools (Optional)
 
@@ -392,14 +426,11 @@ This overrides your `.env` setting just for that session - your main config stay
 
 ### LFM Single-Tool Mode
 
-Local LLMs (Qwen3, GLM-4, etc.) currently tend to loop on tool calls instead of summarizing results. Beast automatically limits LFM to **one tool call per request**, then forces a text response.
+Local LLMs (Qwen3, GLM-4, etc.) currently tend to loop on tool calls instead of summarizing results. Beast automatically limits LFM to **one tool call per request**, then forces a text response. This is controlled by `capabilities.py` — no need to edit `beast.py`.
 
-**When local LLMs improve**, edit `beast.py` and set:
-```python
-LFM_SINGLE_TOOL_MODE = False  # Enable multi-tool for LFM
-```
+**When local LLMs improve**, edit `capabilities.py` and change `SINGLE_TOOL_MODE` and `MAX_TOOL_TURNS`.
 
-Claude and OpenAI handle multi-tool calls properly and are not affected by this setting.
+Claude and OpenAI handle multi-tool calls properly and get the full tier automatically.
 
 ## Commands
 
@@ -409,39 +440,131 @@ Claude and OpenAI handle multi-tool calls properly and are not affected by this 
 ./setup.sh --no-node    # Skip WhatsApp (Python only)
 ./setup.sh --check      # Verify requirements
 
-# Running
+# Running — WhatsApp mode (your normal workflow)
 ./start.sh              # Start server + WhatsApp
 ./start.sh stop         # Stop everything
 ./start.sh status       # Check if running
 ./start.sh server       # Python server only
 ./start.sh whatsapp     # WhatsApp bridge only
 
+# Running — CLI mode (direct terminal chat)
+python3 beast.py        # Interactive chat with Beast in your terminal
+                        # Supports /claude /openai /lfm to switch backends
+
+# Running — Autonomous mode (Beast works by itself)
+python3 heartbeat.py          # Process task queue on a timer (Ctrl+C to stop)
+python3 heartbeat.py --once   # Process one cycle and exit
+python3 heartbeat.py --status # Show task queue
+
 # Management
 ./start.sh clear-history  # Clear all conversations
 ./clear_history.sh        # Quick history clear (standalone)
-
-# CLI mode (for testing)
-source ../.venv/bin/activate
-python3 beast.py
 ```
 
 ## CLI Commands
 
-In CLI mode, type:
-- `/help` - Show help and available commands
-- `/tools` - List all available tools
-- `/new` - Reset conversation
-- `/clear` - Clear all conversation history
-- `/quit` - Exit
+Start CLI mode: `python beast.py` (in the `obedient_beast/` folder)
+
+| Command | What it does |
+|---------|-------------|
+| `/help` | Show help and all commands |
+| `/tools` | List all available tools |
+| `/status` | Show task queue, current tier, and settings |
+| `/new` | Reset conversation (start fresh) |
+| `/clear` | Clear all conversation history |
+| `/claude` | Switch to Claude backend (FULL tier) |
+| `/openai` | Switch to OpenAI backend (FULL tier) |
+| `/lfm` | Switch to local LFM backend (LITE tier) |
+| `/quit` | Exit |
+
+**Backend switching** (`/claude`, `/openai`, `/lfm`) changes the LLM on the fly without restarting. The capability tier (tool limits, memory detail, etc.) updates automatically.
 
 ## WhatsApp Commands
 
 Send these messages to Beast via WhatsApp:
-- `/help` - Show help and available commands
-- `/clear` - Clear all conversation history
-- `/tools` - List all available tools
 
-**Note**: Commands work the same in WhatsApp as CLI mode.
+| Command | What it does |
+|---------|-------------|
+| `/help` | Show help and all commands |
+| `/tools` | List all available tools |
+| `/status` | Show task queue and current tier |
+| `/clear` | Clear all conversation history |
+
+**Note**: `/claude`, `/openai`, `/lfm` backend switching is **CLI only** — WhatsApp uses whatever `LLM_BACKEND` is set in `.env`.
+
+## Task Queue — How to Add Tasks
+
+Beast has an autonomous task queue. There are **3 ways to add tasks**:
+
+### 1. Ask Beast (WhatsApp or CLI)
+Just say things like:
+- "Remind me to check disk space later"
+- "Add a task to organize my downloads"
+- "Queue up: review the log files"
+
+Beast recognizes phrases like "remind me", "later", "add a task" and uses the `add_task` tool automatically.
+
+### 2. Edit tasks.json directly
+Open `workspace/tasks.json` and add a task:
+```json
+{
+  "tasks": [
+    {
+      "id": 1,
+      "description": "check disk space",
+      "priority": "medium",
+      "status": "pending",
+      "created_at": "2026-02-06T10:00:00"
+    }
+  ]
+}
+```
+
+### 3. Via the heartbeat
+When Beast runs autonomously, it can add follow-up tasks to its own queue.
+
+### Check your queue
+- CLI: type `/status`
+- WhatsApp: send `/status`
+- Terminal: `python heartbeat.py --status`
+
+## Autonomous Heartbeat
+
+Beast can work on tasks **by itself** on a timer, without you sending messages.
+
+```bash
+# Start the heartbeat (runs until you Ctrl+C)
+python heartbeat.py
+
+# Process one cycle and exit
+python heartbeat.py --once
+
+# Check task queue status
+python heartbeat.py --status
+```
+
+**How it works:**
+1. Heartbeat wakes up every N minutes (5 min on Claude, 10 min on local LFM)
+2. Checks `workspace/tasks.json` for pending tasks
+3. Picks the highest-priority task and feeds it to `beast.run()`
+4. Beast processes it (using tools as needed) and marks it done/failed
+5. Goes back to sleep
+
+**Tip**: Run the heartbeat in a separate terminal alongside `./start.sh` so Beast handles WhatsApp AND autonomous tasks at the same time.
+
+## Capability Tiers
+
+Beast automatically adjusts its power based on which LLM backend is active:
+
+| Setting | Claude/OpenAI (FULL) | Local LFM (LITE) |
+|---------|---------------------|-------------------|
+| Max tool calls per turn | 10 | 2 |
+| Single-tool mode | Off | On (prevents loops) |
+| Heartbeat interval | 5 min | 10 min |
+| Tasks per heartbeat cycle | 3 | 1 |
+| Memory detail saved | Full context | Key facts only |
+
+Tiers are set in `capabilities.py` and auto-detect from `LLM_BACKEND` in `.env`.
 
 ## WhatsApp Setup
 
@@ -528,7 +651,11 @@ obedient_beast/whatsapp/auth_info/  → Inside the AGENTS repo
 | MCP Support | ❌ Custom only | ✅ Native MCP |
 | Tool Ecosystem | Closed | Open (any MCP) |
 | Computer Control | Via plugins | Built-in |
-| Codebase Size | 150k+ lines | <1k lines |
+| Autonomous Tasks | Cron/webhooks | Heartbeat + task queue |
+| Persistent Memory | Via plugins | Built-in (MCP memory) |
+| Backend Switching | ❌ | `/claude` `/openai` `/lfm` live |
+| Capability Tiers | ❌ | Auto (FULL/LITE by backend) |
+| Codebase Size | 150k+ lines | <1.5k lines |
 | Local-first | ✅ | ✅ |
 | Setup | Complex | One command |
 
