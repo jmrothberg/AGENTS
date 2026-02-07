@@ -4,8 +4,11 @@ Capability Tiers - Backend-aware settings for Beast
 ====================================================
 Reads LLM_BACKEND from environment and exposes tiered settings.
 
-Claude/OpenAI = FULL mode (powerful, multi-tool)
-LFM (local)   = LITE mode (restricted, single-tool friendly)
+Claude/OpenAI     = FULL mode (powerful, multi-tool)
+"lfm" (any local) = LITE mode (restricted, single-tool friendly)
+
+"lfm" is a legacy name — it means any model served by the local server,
+not just LFM-2.5 models.
 
 Inspired by Clawdbot/OpenClaw's tiered agent architecture.
 """
@@ -22,7 +25,7 @@ _BACKEND = os.getenv("LLM_BACKEND_TEST") or os.getenv("LLM_BACKEND", "claude")
 
 
 def _is_local() -> bool:
-    """Check if we're running a local/LFM backend (restricted tier)."""
+    """Check if we're running a local backend (anything that isn't claude/openai)."""
     return _BACKEND not in ("claude", "openai")
 
 
@@ -50,7 +53,7 @@ HEARTBEAT_TASKS_PER_CYCLE = 1 if _is_local() else 3
 # Memory detail level: "full" saves rich context, "minimal" saves key facts only
 MEMORY_DETAIL = "minimal" if _is_local() else "full"
 
-# Label for logging
+# Label for logging ("LFM" in the label is legacy — means any local model)
 TIER_LABEL = "LITE (local LFM)" if _is_local() else f"FULL ({_BACKEND})"
 
 

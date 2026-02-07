@@ -1,7 +1,10 @@
 #!/usr/bin/env python3
 """
-Unified LLM client supporting LFM (local), OpenAI, and Claude.
+Unified LLM client supporting local models, OpenAI, and Claude.
 Handles tool calling for all backends.
+
+"lfm" backend = any local model served via lfm_thinking.py / linux_thinking.py.
+Name is legacy from LFM-2.5 models but works with any model on the local server.
 """
 
 import os
@@ -39,7 +42,8 @@ class LLMResponse:
 
 
 class LLM:
-    """Unified LLM client for LFM/OpenAI/Claude with tool calling."""
+    """Unified LLM client for local/OpenAI/Claude with tool calling.
+    Backend "lfm" = local model server (legacy name, serves any model)."""
     
     def __init__(self, backend: str = None):
         self.backend = backend or BACKEND
@@ -162,7 +166,8 @@ class LLM:
         return LLMResponse(text=text, tool_calls=tool_calls, raw=response.model_dump())
     
     def _lfm(self, messages: list, tools: list, system: str) -> LLMResponse:
-        """Call local LFM server (OpenAI-compatible) with text-based tool calling.
+        """Call local model server (OpenAI-compatible) with text-based tool calling.
+        Method name is legacy ("lfm") but works with any model on the local server.
         Tries localhost first, then falls back to remote server."""
         import urllib.request
         import urllib.error

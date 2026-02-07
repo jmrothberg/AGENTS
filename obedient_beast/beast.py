@@ -4,7 +4,7 @@ Obedient Beast - CLI + Agent Loop + Tools
 ==========================================
 A minimal agentic assistant with tool calling, autonomous task queue,
 persistent memory, and tiered capabilities (FULL for Claude/OpenAI,
-LITE for local LFM).
+LITE for local models via "lfm" backend — legacy name, works with any local model).
 
 Usage:
     python beast.py                     # Interactive CLI mode

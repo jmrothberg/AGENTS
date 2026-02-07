@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
-Streaming Test Client for LFM OpenAI-compatible server
-======================================================
-Run this AFTER starting the server with: python lfm_thinking.py (choose server mode)
+Streaming Test Client for the local model OpenAI-compatible server
+===================================================================
+Run this AFTER starting the server with: python lfm_thinking.py or linux_thinking.py (choose server mode)
 
 Usage: python test_client.py [host] [port]
   Default: python test_client.py localhost 8000
@@ -168,7 +168,7 @@ def interactive_chat(model_name):
             break
 
 def main():
-    print(f"\n🔍 Testing LFM Server at {BASE_URL}\n")
+    print(f"\n🔍 Testing local model server at {BASE_URL}\n")
     
     # Run connectivity tests
     model_name = test_health()

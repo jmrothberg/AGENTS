@@ -1,11 +1,14 @@
 """
-LFM-2.5 Inference Script (Text & Vision)
-========================================
+Local Model Inference Script (Text & Vision)
+=============================================
 Written by Jonathan M Rothberg
 
-Runs LiquidAI's LFM models locally:
-- LFM2.5-1.2B-Thinking: Text-only reasoning model
-- LFM2.5-VL-1.6B: Vision-Language model with image/video support
+Dynamically scans model directories and serves any compatible model locally.
+- macOS: Uses MLX (mlx-lm for text, mlx-vlm for vision)
+- Linux: Falls back to transformers/PyTorch
+
+Model type (text vs vision) is auto-detected from config.json.
+Filename is "lfm_thinking.py" for legacy reasons (started with LFM-2.5 models).
 
 USAGE: python lfm_thinking.py
 """
@@ -120,11 +123,8 @@ if not IS_MACOS:
     os.environ.setdefault("CUDA_DEVICE_MAX_CONNECTIONS", "1")
     os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
 
-# Local model paths - platform specific
-# macOS MLX models directory
-MLX_MODELS_DIR = "/Users/jonathanrothberg/MLX_Models"
-# Linux transformers models directory
-LINUX_MODELS_DIR = "/home/jonathan/Models_Transformer"
+# Model directories - all subfolders are scanned and offered in the selection menu
+MLX_MODELS_DIR = "/Users/jonathanrothberg/MLX_Models"          # macOS MLX models
 
 def scan_mlx_models(models_dir):
     """
@@ -178,52 +178,8 @@ def scan_mlx_models(models_dir):
     
     return models
 
-def scan_linux_models(models_dir):
-    """
-    Dynamically scan the Linux transformers models directory.
-    Returns dict: {"1": (path, type, description), ...}
-    """
-    models = {}
-    if not os.path.exists(models_dir):
-        return models
-    
-    model_dirs = sorted([
-        d for d in os.listdir(models_dir) 
-        if os.path.isdir(os.path.join(models_dir, d)) and not d.startswith('.')
-    ])
-    
-    for idx, model_name in enumerate(model_dirs, 1):
-        model_path = os.path.join(models_dir, model_name)
-        config_path = os.path.join(model_path, "config.json")
-        
-        # Detect model type from config
-        model_type = "text"
-        if os.path.exists(config_path):
-            try:
-                with open(config_path, 'r') as f:
-                    config = json.load(f)
-                    mt = config.get("model_type", "").lower()
-                    if any(x in mt for x in ["vl", "vision", "image"]):
-                        model_type = "vision"
-            except:
-                pass
-        
-        type_label = "(Vision-Language)" if model_type == "vision" else "(Text)"
-        description = f"{model_name} {type_label}"
-        
-        models[str(idx)] = (model_path, model_type, description)
-    
-    return models
-
 # Scan models dynamically at startup
-if IS_MACOS:
-    MLX_MODELS = scan_mlx_models(MLX_MODELS_DIR)
-else:
-    MLX_MODELS = scan_linux_models(LINUX_MODELS_DIR)
-
-# Fallback paths for Linux (legacy support)
-TEXT_MODEL_PATH = "/home/jonathan/Models_Transformer/LFM2.5-1.2B-Thinking"
-VL_MODEL_PATH = "/home/jonathan/Models_Transformer/LFM2.5-VL-1.6B"
+MLX_MODELS = scan_mlx_models(MLX_MODELS_DIR)
 
 # ============================================================================
 # OpenAI-Compatible Server Mode
@@ -247,7 +203,7 @@ def run_server_mode(model, tokenizer, processor, model_name, model_type, host="0
         print("Install with: pip install fastapi uvicorn")
         return
     
-    app = FastAPI(title="LFM Local Server", description="OpenAI-compatible API for local LFM models")
+    app = FastAPI(title="Local Model Server", description="OpenAI-compatible API for local models")
     
     # Allow CORS for local network access
     app.add_middleware(
@@ -820,35 +776,22 @@ while switch_model:
     print("Model Selection")
     print("=" * 50)
 
-    if IS_MACOS:
-        # Show all MLX models on macOS
-        for key, (path, model_type, desc) in MLX_MODELS.items():
-            vl_tag = " [VL]" if model_type == "vision" else ""
-            print(f"{key}. {desc}{vl_tag}")
-    else:
-        # Ubuntu: show original options
-        print("1. LFM2.5-1.2B-Thinking (Text-only, reasoning)")
-        print("2. LFM2.5-VL-1.6B (Vision-Language, images + video)")
+    # Show all dynamically scanned models
+    for key, (path, model_type, desc) in MLX_MODELS.items():
+        vl_tag = " [VL]" if model_type == "vision" else ""
+        print(f"{key}. {desc}{vl_tag}")
 
     print("=" * 50)
 
-    if IS_MACOS:
-        valid_choices = set(MLX_MODELS.keys())
-        while True:
-            choice = input(f"Select model ({'/'.join(sorted(valid_choices))}): ").strip()
-            if choice in valid_choices:
-                break
-            print(f"Please enter one of: {', '.join(sorted(valid_choices))}")
-        
-        selected_path, selected_type, selected_desc = MLX_MODELS[choice]
-        use_vl_model = (selected_type == "vision")
-    else:
-        while True:
-            choice = input("Select model (1 or 2): ").strip()
-            if choice in {"1", "2"}:
-                break
-            print("Please enter 1 or 2")
-        use_vl_model = (choice == "2")
+    valid_choices = set(MLX_MODELS.keys())
+    while True:
+        choice = input(f"Select model ({'/'.join(sorted(valid_choices))}): ").strip()
+        if choice in valid_choices:
+            break
+        print(f"Please enter one of: {', '.join(sorted(valid_choices))}")
+    
+    selected_path, selected_type, selected_desc = MLX_MODELS[choice]
+    use_vl_model = (selected_type == "vision")
 
     # ============================================================================
     # Mode Selection: Interactive or Server
@@ -881,91 +824,41 @@ while switch_model:
     # ============================================================================
     # Load Selected Model
     # ============================================================================
-    if IS_MACOS and MLX_AVAILABLE:
-        # macOS: Use MLX
-        if use_vl_model and MLX_VLM_AVAILABLE:
-            print(f"\nLoading {selected_desc} (MLX Vision)...")
-            model, processor = vlm_load(selected_path)
-            tokenizer = None  # VLM uses processor
-            
-            # If server mode, start server and skip interactive loop
-            if run_as_server:
-                run_server_mode(model, tokenizer, processor, selected_desc, "vision", port=server_port)
-                switch_model = False  # Exit after server stops
-                break
-            
-            print(f"\n{selected_desc} Interactive Chat")
-            print("=" * 50)
-            print("Type your question, then choose media type.")
-            print("Type 'quit' to exit.")
-            print("=" * 50 + "\n")
-        elif not use_vl_model and MLX_LM_AVAILABLE:
-            print(f"\nLoading {selected_desc} (MLX Text)...")
-            model, tokenizer = lm_load(selected_path)
-            processor = None  # Text model uses tokenizer
-            
-            # If server mode, start server and skip interactive loop
-            if run_as_server:
-                run_server_mode(model, tokenizer, processor, selected_desc, "text", port=server_port)
-                switch_model = False  # Exit after server stops
-                break
-            
-            print(f"\n{selected_desc} Interactive Chat")
-            print("=" * 50)
-            print("Enter prompts below. Type 'quit' to exit, 'model' to switch models.")
-            print("=" * 50 + "\n")
-        else:
-            print(f"Error: Required MLX library not available for this model type.")
-            print("Install with: pip install mlx-vlm mlx-lm")
-            exit(1)
+    if use_vl_model and MLX_VLM_AVAILABLE:
+        print(f"\nLoading {selected_desc} (MLX Vision)...")
+        model, processor = vlm_load(selected_path)
+        tokenizer = None  # VLM uses processor
+        
+        # If server mode, start server and skip interactive loop
+        if run_as_server:
+            run_server_mode(model, tokenizer, processor, selected_desc, "vision", port=server_port)
+            switch_model = False  # Exit after server stops
+            break
+        
+        print(f"\n{selected_desc} Interactive Chat")
+        print("=" * 50)
+        print("Type your question, then choose media type.")
+        print("Type 'quit' to exit.")
+        print("=" * 50 + "\n")
+    elif not use_vl_model and MLX_LM_AVAILABLE:
+        print(f"\nLoading {selected_desc} (MLX Text)...")
+        model, tokenizer = lm_load(selected_path)
+        processor = None  # Text model uses tokenizer
+        
+        # If server mode, start server and skip interactive loop
+        if run_as_server:
+            run_server_mode(model, tokenizer, processor, selected_desc, "text", port=server_port)
+            switch_model = False  # Exit after server stops
+            break
+        
+        print(f"\n{selected_desc} Interactive Chat")
+        print("=" * 50)
+        print("Enter prompts below. Type 'quit' to exit, 'model' to switch models.")
+        print("=" * 50 + "\n")
     else:
-        # Ubuntu/Linux: Use transformers
-        if use_vl_model:
-            print("\nLoading LFM2.5-VL-1.6B (Vision-Language)...")
-            model = AutoModelForImageTextToText.from_pretrained(
-                VL_MODEL_PATH,
-                device_map="auto",
-                dtype="bfloat16",
-                trust_remote_code=True,
-                local_files_only=True,
-            )
-            processor = AutoProcessor.from_pretrained(VL_MODEL_PATH, trust_remote_code=True, local_files_only=True)
-            tokenizer = None
-            
-            # If server mode, start server and skip interactive loop
-            if run_as_server:
-                run_server_mode(model, tokenizer, processor, "LFM2.5-VL-1.6B", "vision", port=server_port)
-                switch_model = False
-                break
-            
-            print("\nLFM2.5-VL-1.6B Interactive Chat")
-            print("=" * 50)
-            print("Type your question, then choose media type.")
-            print("Type 'quit' to exit.")
-            print("=" * 50 + "\n")
-        else:
-            print("\nLoading LFM2.5-1.2B-Thinking (Text-only)...")
-            model = AutoModelForCausalLM.from_pretrained(
-                TEXT_MODEL_PATH,
-                device_map="auto",
-                dtype="bfloat16",
-                trust_remote_code=True,
-                local_files_only=True,
-            )
-            tokenizer = AutoTokenizer.from_pretrained(TEXT_MODEL_PATH, trust_remote_code=True, local_files_only=True)
-            streamer = TextStreamer(tokenizer, skip_prompt=True, skip_special_tokens=True)
-            processor = None
-            
-            # If server mode, start server and skip interactive loop
-            if run_as_server:
-                run_server_mode(model, tokenizer, processor, "LFM2.5-1.2B-Thinking", "text", port=server_port)
-                switch_model = False
-                break
-            
-            print("\nLFM2.5-1.2B-Thinking Interactive Chat")
-            print("=" * 50)
-            print("Enter prompts below. Type 'quit' to exit, 'model' to switch models.")
-            print("=" * 50 + "\n")
+        print(f"Error: Required MLX library not available for this model type.")
+        print("Install with: pip install mlx-vlm mlx-lm")
+        exit(1)
 
     # ============================================================================
     # Main Chat Loop
