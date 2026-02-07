@@ -24,7 +24,7 @@
       "command": "npx -y @modelcontextprotocol/server-sequential-thinking",
       "description": "Complex reasoning - breaks down hard problems step by step",
       "local": true,
-      "note": "Enable when you need Beast to solve complex multi-step problems"
+      "note": "Only useful in FULL tier (Claude/OpenAI). LITE tier uses AGENTS.md reasoning prompts instead. Enable with: capabilities.SEQUENTIAL_THINKING_ENABLED"
     },
     "brave-search": {
       "enabled": true,

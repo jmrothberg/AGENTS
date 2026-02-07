@@ -1,0 +1,4 @@
+{
+  "tasks": [],
+  "_comment": "Task queue for Beast autonomous mode. Tasks are added by the user, WhatsApp, or Beast itself via the add_task tool. Format: {id, description, status, priority, created_at}"
+}

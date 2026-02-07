@@ -81,18 +81,55 @@ def get_and_clear_pending_image() -> str:
     _pending_image = None
     return path
 
-# Load personality from SOUL.md if it exists
+# Load personality from SOUL.md and AGENTS.md if they exist
 def load_system_prompt() -> str:
     soul_file = WORKSPACE / "SOUL.md"
+    agents_file = WORKSPACE / "AGENTS.md"
     base_prompt = """You are Obedient Beast, a helpful AI assistant that can execute commands and manage files.
 You have access to tools to help the user. Use them when needed.
 Be concise and helpful. When executing commands, explain what you're doing."""
     
+    prompt = ""
     if soul_file.exists():
-        return soul_file.read_text() + "\n\n" + base_prompt
-    return base_prompt
+        prompt += soul_file.read_text() + "\n\n"
+    # AGENTS.md: standing goals, reasoning templates, memory guidelines (Phase 4)
+    if agents_file.exists():
+        prompt += agents_file.read_text() + "\n\n"
+    prompt += base_prompt
+    return prompt
 
 SYSTEM_PROMPT = load_system_prompt()
+
+
+def _try_memory_save(session_id: str, user_input: str, response_text: str):
+    """
+    Auto-save key facts to memory MCP at end of a conversation turn.
+    Only runs if MCP is enabled and memory server is available.
+    Respects the capability tier (full vs minimal detail).
+    """
+    if not MCP_ENABLED or _mcp_client is None:
+        return
+    try:
+        from capabilities import MEMORY_DETAIL
+        # Build a concise fact to store
+        if MEMORY_DETAIL == "minimal":
+            # Just store that a conversation happened and any key facts
+            fact = f"Session {session_id}: user asked about '{user_input[:80]}'"
+        else:
+            # Store richer context
+            fact = f"Session {session_id}: user asked '{user_input[:120]}', beast responded with '{response_text[:200]}'"
+        
+        # Try to create an entity in the memory knowledge graph
+        execute_mcp_tool("mcp_memory_create_entities", {
+            "entities": json.dumps([{
+                "name": f"conversation_{session_id}_{datetime.now().strftime('%H%M%S')}",
+                "entityType": "conversation",
+                "observations": [fact]
+            }])
+        })
+    except Exception as e:
+        # Memory save is best-effort, never block the response
+        print(f"[Memory] Auto-save failed (non-fatal): {e}", file=sys.stderr)
 
 # ---------------------------------------------------------------------------
 # Tools Definition
@@ -183,6 +220,26 @@ TOOLS = [
         "name": "enable_mcp_server",
         "description": "Enable or disable an MCP server by name.",
         "params": {"name": "Server name", "enabled": "true or false"}
+    },
+    # ---------------------------------------------------------------------------
+    # Autonomous Agent Tools (Phase 4 - Clawdbot-inspired)
+    # ---------------------------------------------------------------------------
+    {
+        "name": "add_task",
+        "description": "Add, update, or complete a task in the autonomous task queue. Beast and users can queue work for later.",
+        "params": {
+            "description": "What the task is (required for new tasks)",
+            "priority": "low, medium, or high (default: medium)",
+            "status": "pending, done, or failed (default: pending). Use 'done'/'failed' to close a task.",
+            "task_id": "Optional: ID of existing task to update its status"
+        }
+    },
+    {
+        "name": "recall_memory",
+        "description": "Recall facts from persistent memory. Use to remember user preferences, past decisions, or project context.",
+        "params": {
+            "query": "What to search for in memory (e.g., 'user preferences', 'project config')"
+        }
     },
 ]
 
@@ -356,6 +413,60 @@ def execute_tool(name: str, args: dict) -> str:
             return f"Server '{server_name}' is now {status}. Restart Beast to apply."
         
         # ---------------------------------------------------------------------------
+        # Autonomous Agent Tools (Phase 4 - Clawdbot-inspired)
+        # ---------------------------------------------------------------------------
+        elif name == "add_task":
+            tasks_file = WORKSPACE / "tasks.json"
+            if tasks_file.exists():
+                data = json.loads(tasks_file.read_text())
+            else:
+                data = {"tasks": []}
+            
+            task_id = args.get("task_id")
+            if task_id:
+                # Update existing task status
+                for t in data["tasks"]:
+                    if str(t.get("id")) == str(task_id):
+                        new_status = args.get("status", t.get("status", "pending"))
+                        t["status"] = new_status
+                        t["updated_at"] = datetime.now().isoformat()
+                        tasks_file.write_text(json.dumps(data, indent=2))
+                        return f"Task #{task_id} updated to '{new_status}'."
+                return f"Error: Task #{task_id} not found."
+            else:
+                # Add new task
+                max_id = max((t.get("id", 0) for t in data["tasks"]), default=0)
+                new_task = {
+                    "id": max_id + 1,
+                    "description": args.get("description", "No description"),
+                    "priority": args.get("priority", "medium"),
+                    "status": args.get("status", "pending"),
+                    "created_at": datetime.now().isoformat()
+                }
+                data["tasks"].append(new_task)
+                tasks_file.write_text(json.dumps(data, indent=2))
+                return f"Task #{new_task['id']} added: {new_task['description']} [{new_task['priority']}]"
+        
+        elif name == "recall_memory":
+            # Use the memory MCP server if available, otherwise check session files
+            if MCP_ENABLED and _mcp_client is not None:
+                try:
+                    # Call the memory MCP server to search for entities
+                    query = args.get("query", "")
+                    result = execute_mcp_tool("mcp_memory_search_nodes", {"query": query})
+                    if result and not result.startswith("Error"):
+                        return f"Memory recall for '{query}':\n{result}"
+                    # Fallback: try to read all entities
+                    result = execute_mcp_tool("mcp_memory_read_graph", {})
+                    if result and not result.startswith("Error"):
+                        return f"Full memory graph:\n{result}"
+                    return f"No memories found for '{query}'. Memory MCP may not have data yet."
+                except Exception as e:
+                    return f"Memory recall error: {e}. Memory MCP may not be running."
+            else:
+                return "Memory MCP not available. Enable MCP_ENABLED=true and configure the memory server."
+        
+        # ---------------------------------------------------------------------------
         # MCP Tools (Phase 2) - handled by prefix
         # ---------------------------------------------------------------------------
         elif name.startswith("mcp_"):
@@ -412,8 +523,8 @@ def run(user_input: str, session_id: str = "default", llm=None) -> str:
     # Handle slash commands before LLM processing
     if user_input.strip().lower() in ["/clear", "/clear-history", "/reset"]:
         try:
-            # Clear all session files for this session
-            session_dir = Path("sessions")
+            # Clear all session files - use path relative to beast.py location (works on any machine)
+            session_dir = Path(__file__).parent / "sessions"
             if session_dir.exists():
                 for f in session_dir.glob("*.jsonl"):
                     f.unlink()
@@ -436,14 +547,45 @@ def run(user_input: str, session_id: str = "default", llm=None) -> str:
 • `/help` - Show this help message
 • `/clear` - Clear all conversation history
 • `/tools` - List all available tools
+• `/status` - Show task queue and current tier
+
+**Backend Switching (CLI only):**
+• `/claude` - Switch to Claude backend (FULL tier)
+• `/openai` - Switch to OpenAI backend (FULL tier)
+• `/lfm` - Switch to local LFM backend (LITE tier)
 
 **Tools Available:**
 • File operations (read/write/edit/list)
 • Computer control (screenshot, mouse, keyboard)
 • Terminal/shell commands
+• Task queue (add_task, recall_memory)
 • Web search (with MCP enabled)
 
 Just ask me to use any tool or help with tasks!"""
+
+    # /status - Show task queue and capability tier (works from CLI and WhatsApp)
+    if user_input.strip().lower() == "/status":
+        from capabilities import TIER_LABEL, MAX_TOOL_TURNS, HEARTBEAT_INTERVAL_SEC
+        tasks_file = WORKSPACE / "tasks.json"
+        status_lines = [f"🐺 **Beast Status**", f"  Tier: {TIER_LABEL}", f"  Max tool turns: {MAX_TOOL_TURNS}", f"  Heartbeat: every {HEARTBEAT_INTERVAL_SEC // 60} min"]
+        if tasks_file.exists():
+            try:
+                data = json.loads(tasks_file.read_text())
+                tasks = data.get("tasks", [])
+                pending = [t for t in tasks if t.get("status") == "pending"]
+                done = [t for t in tasks if t.get("status") == "done"]
+                failed = [t for t in tasks if t.get("status") == "failed"]
+                status_lines.append(f"\n📋 **Task Queue** ({len(tasks)} total)")
+                status_lines.append(f"  ⏳ Pending: {len(pending)}  ✅ Done: {len(done)}  ❌ Failed: {len(failed)}")
+                if pending:
+                    status_lines.append("  **Pending tasks:**")
+                    for t in pending:
+                        status_lines.append(f"    #{t.get('id', '?')} [{t.get('priority', '?')}] {t.get('description', 'No description')[:50]}")
+            except Exception:
+                status_lines.append("  Task queue: error reading tasks.json")
+        else:
+            status_lines.append("  Task queue: empty (no tasks.json)")
+        return "\n".join(status_lines)
 
     # Load history and add user message
     history = load_session(session_id)
@@ -451,32 +593,25 @@ Just ask me to use any tool or help with tasks!"""
     history.append(user_msg)
     save_message(session_id, user_msg)
     
-    max_turns = 10
+    # ---------------------------------------------------------------------------
+    # Capability-tiered settings (Phase 4 - from capabilities.py)
+    # Replaces hardcoded max_turns=10 and LFM_SINGLE_TOOL_MODE=True
+    # Claude/OpenAI get full power, local LFM gets restricted mode
+    # ---------------------------------------------------------------------------
+    from capabilities import MAX_TOOL_TURNS, SINGLE_TOOL_MODE
+    
+    max_turns = MAX_TOOL_TURNS
     all_tools = get_all_tools()  # Built-in + MCP tools
     tools_used = False  # Track if we've already used a tool
     
-    # ---------------------------------------------------------------------------
-    # LFM_SINGLE_TOOL_MODE: Workaround for local LLMs that loop on tool calls
-    # ---------------------------------------------------------------------------
-    # Current local models (Qwen3, GLM-4, etc.) tend to keep calling tools
-    # indefinitely instead of summarizing results. This flag limits them to
-    # one tool call per request, then forces a text response.
-    #
-    # Claude and OpenAI handle multi-tool calls properly, so they're excluded.
-    #
-    # TODO: When local LLMs improve at multi-tool orchestration, set this to False
-    # or make it configurable per-model in .env (e.g., LFM_MULTI_TOOL=true)
-    # ---------------------------------------------------------------------------
-    LFM_SINGLE_TOOL_MODE = True  # Set to False to enable multi-tool for LFM
-    
     for turn in range(max_turns):
-        # Determine which tools to send based on backend and mode
-        if llm.backend == "lfm" and LFM_SINGLE_TOOL_MODE and tools_used:
-            # LFM single-tool mode: Don't send tools after first use
+        # Determine which tools to send based on backend and capability tier
+        if SINGLE_TOOL_MODE and tools_used:
+            # LITE mode (local LFM): Don't send tools after first use
             # This forces the model to summarize the result instead of looping
             current_tools = None
         else:
-            # Claude/OpenAI or LFM multi-tool mode: Always send all tools
+            # FULL mode (Claude/OpenAI): Always send all tools
             current_tools = all_tools
         
         # Call LLM
@@ -537,6 +672,8 @@ Just ask me to use any tool or help with tasks!"""
             final_msg = {"role": "assistant", "content": response.text}
             history.append(final_msg)
             save_message(session_id, final_msg)
+            # Auto-save key facts to memory MCP (Phase 4 - best-effort)
+            _try_memory_save(session_id, user_input, response.text)
             return response.text
     
     return "(Max turns reached - stopping)"
@@ -549,6 +686,7 @@ Just ask me to use any tool or help with tasks!"""
 def cli():
     """Interactive CLI mode."""
     from llm import BACKEND
+    from capabilities import TIER_LABEL, MAX_TOOL_TURNS
     
     all_tools = get_all_tools()
     builtin_count = len(TOOLS)
@@ -557,11 +695,12 @@ def cli():
     print("=" * 60)
     print("🐺 Obedient Beast - AI Assistant")
     print(f"   Backend: {BACKEND}")
+    print(f"   Tier: {TIER_LABEL} (max {MAX_TOOL_TURNS} tool turns)")
     print(f"   Tools: {builtin_count} built-in" + (f" + {mcp_count} MCP" if mcp_count > 0 else ""))
     if MCP_ENABLED:
         print(f"   MCP: enabled")
     print("=" * 60)
-    print("Type your message. Commands: /help, /new (reset), /clear (clear history), /quit (exit), /tools (list)")
+    print("Commands: /help, /status, /new, /clear, /quit, /tools, /claude, /openai, /lfm")
     print("=" * 60 + "\n")
     
     session_id = f"cli_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
@@ -590,6 +729,20 @@ def cli():
                     prefix = "[MCP] " if t["name"].startswith("mcp_") else ""
                     print(f"  {prefix}{t['name']}: {t['description'][:60]}...")
                 print()
+                continue
+            
+            # /claude, /openai, /lfm - switch LLM backend on the fly
+            if user_input.lower() in ["/claude", "/openai", "/lfm"]:
+                new_backend = user_input.lower().lstrip("/")
+                llm = get_llm(new_backend)
+                # Reload capabilities for the new backend tier
+                import capabilities
+                os.environ["LLM_BACKEND_TEST"] = new_backend
+                # Force capabilities module to re-evaluate tier
+                import importlib
+                importlib.reload(capabilities)
+                from capabilities import TIER_LABEL as new_tier, MAX_TOOL_TURNS as new_max
+                print(f"Switched to {new_backend} backend. Tier: {new_tier} (max {new_max} tool turns)\n")
                 continue
             
             print("Beast: ", end="", flush=True)
