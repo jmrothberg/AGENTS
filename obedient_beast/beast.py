@@ -528,18 +528,39 @@ def run(user_input: str, session_id: str = "default", llm=None) -> str:
         llm = get_llm()
 
     # Handle slash commands before LLM processing
-    if user_input.strip().lower() in ["/clear", "/clear-history", "/reset"]:
+    cmd = user_input.strip().lower()
+
+    # --- /clear variants ---
+    if cmd in ["/clear", "/clear-history", "/reset"]:
         try:
-            # Clear all session files - use path relative to beast.py location (works on any machine)
             session_dir = Path(__file__).parent / "sessions"
             if session_dir.exists():
                 for f in session_dir.glob("*.jsonl"):
                     f.unlink()
-            return "🧠 Memory cleared! All conversations have been forgotten."
+            return "🧹 Chat history cleared. (Tasks untouched — use `/clear tasks` to clear those.)"
         except Exception as e:
             return f"❌ Error clearing history: {e}"
 
-    if user_input.strip().lower() == "/tools":
+    if cmd == "/clear tasks":
+        tasks_file = WORKSPACE / "tasks.json"
+        tasks_file.write_text(json.dumps({"tasks": []}, indent=2))
+        return "🧹 Task queue cleared."
+
+    if cmd == "/clear all":
+        # Clear chat history
+        try:
+            session_dir = Path(__file__).parent / "sessions"
+            if session_dir.exists():
+                for f in session_dir.glob("*.jsonl"):
+                    f.unlink()
+        except Exception:
+            pass
+        # Clear task queue
+        tasks_file = WORKSPACE / "tasks.json"
+        tasks_file.write_text(json.dumps({"tasks": []}, indent=2))
+        return "🧹 All cleared — chat history and task queue."
+
+    if cmd == "/tools":
         tools = get_all_tools()
         tool_list = ["Available tools:"]
         for t in tools:
@@ -547,49 +568,60 @@ def run(user_input: str, session_id: str = "default", llm=None) -> str:
             tool_list.append(f"  {prefix}{t['name']}: {t['description'][:60]}...")
         return "\n".join(tool_list)
 
-    if user_input.strip().lower() == "/help":
+    # --- /help (short) ---
+    if cmd == "/help":
         return """🐺 **Beast Commands:**
-• `/status` - Task queue & current backend
+• `/status` - Task queue & backend info
+• `/tasks` - List all tasks
 • `/claude` `/openai` `/lfm` - Switch backend
-• `/clear` - Clear history
-• `/tools` - List tools
+• `/heartbeat on|off` - Start/stop background tasks
+• `/clear` - Clear chat history
 • `/more` - Full help with examples
 
-**Quick tips:** Just talk to me! Say "remind me to..." to queue a task."""
+**Quick tips:** Say "remind me to..." or "add a task..." to queue work!"""
 
-    if user_input.strip().lower() == "/more":
+    # --- /more (detailed) ---
+    if cmd == "/more":
         return """🐺 **Obedient Beast — Full Help**
 
-**Commands:**
+**Status & Info:**
 • `/help` - Quick help
-• `/status` - Show task queue, current backend & tier
+• `/status` - Backend, tier, heartbeat state, task summary
+• `/tasks` - List all tasks with status
+• `/tools` - List all available tools
+
+**Backend Switching:**
 • `/claude` - Switch to Claude (FULL tier, 10 tool calls)
 • `/openai` - Switch to OpenAI (FULL tier, 10 tool calls)
 • `/lfm` - Switch to local LFM (LITE tier, 2 tool calls)
-• `/clear` - Clear all conversation history
-• `/tools` - List all available tools
 
-**Task Queue — say things like:**
-• "remind me to check disk space"
-• "add a task to organize my downloads"
-• "later, review the log files"
-Beast queues these for autonomous processing.
+**Task Management:**
+• "remind me to check disk space" → queues a task
+• "add a task to organize downloads" → queues a task
+• "later, review the log files" → queues a task
+• `/tasks` - List all tasks
+• `/done 3` - Mark task #3 as done
+• `/drop 3` - Remove task #3 from queue
+• `/clear tasks` - Clear all tasks
 
-**Tools — just ask:**
-• "take a screenshot" → screenshot tool
-• "list files in ~/Documents" → list_dir tool
-• "run ls -la" → shell tool
-• "what do you remember about X?" → recall_memory tool
+**Clearing:**
+• `/clear` - Clear chat history only
+• `/clear tasks` - Clear task queue only
+• `/clear all` - Clear everything
 
-**Autonomous mode (separate terminal):**
-Run `python heartbeat.py` — Beast processes queued tasks on a timer.
+**Heartbeat (autonomous background processing):**
+• `/heartbeat on` - Enable background task processing
+• `/heartbeat off` - Disable background task processing
+• `/heartbeat` - Show heartbeat status
+Then run `python heartbeat.py` in a terminal — it respects the on/off setting.
 
-**Tiers:** Claude/OpenAI = FULL (10 tool calls, rich memory). LFM = LITE (2 tool calls, minimal memory). Auto-switches with /claude /lfm."""
+**Tiers:** Claude/OpenAI = FULL (10 tool calls, rich memory).
+LFM = LITE (2 tool calls, minimal memory). Switch anytime with /claude /lfm."""
 
-    # /claude, /openai, /lfm - switch backend (works from WhatsApp AND CLI)
-    if user_input.strip().lower() in ["/claude", "/openai", "/lfm"]:
+    # --- /claude, /openai, /lfm - switch backend (works from WhatsApp AND CLI) ---
+    if cmd in ["/claude", "/openai", "/lfm"]:
         global _backend_override
-        new_backend = user_input.strip().lower().lstrip("/")
+        new_backend = cmd.lstrip("/")
         _backend_override = new_backend
         os.environ["LLM_BACKEND_TEST"] = new_backend
         # Reload capabilities for the new backend tier
@@ -599,11 +631,98 @@ Run `python heartbeat.py` — Beast processes queued tasks on a timer.
         from capabilities import TIER_LABEL as new_tier, MAX_TOOL_TURNS as new_max
         return f"🔄 Switched to **{new_backend}** backend. Tier: {new_tier} (max {new_max} tool turns)"
 
-    # /status - Show task queue and capability tier (works from CLI and WhatsApp)
-    if user_input.strip().lower() == "/status":
+    # --- /tasks - list all tasks with status ---
+    if cmd == "/tasks":
+        tasks_file = WORKSPACE / "tasks.json"
+        if not tasks_file.exists():
+            return "📋 No tasks yet. Say 'remind me to...' to add one."
+        data = json.loads(tasks_file.read_text())
+        tasks = data.get("tasks", [])
+        if not tasks:
+            return "📋 Task queue is empty. Say 'remind me to...' to add one."
+        lines = ["📋 **All Tasks:**"]
+        for t in tasks:
+            icon = {"pending": "⏳", "done": "✅", "failed": "❌", "in_progress": "🔄"}.get(t.get("status"), "❓")
+            lines.append(f"  {icon} #{t.get('id','?')} [{t.get('priority','?')}] {t.get('description','')[:60]} — {t.get('status','?')}")
+        return "\n".join(lines)
+
+    # --- /done <id> - mark a task as done ---
+    if cmd.startswith("/done "):
+        try:
+            task_id = int(cmd.split()[1])
+        except (IndexError, ValueError):
+            return "Usage: `/done <task_id>` — e.g. `/done 3`"
+        tasks_file = WORKSPACE / "tasks.json"
+        if not tasks_file.exists():
+            return "❌ No tasks file found."
+        data = json.loads(tasks_file.read_text())
+        for t in data["tasks"]:
+            if t.get("id") == task_id:
+                t["status"] = "done"
+                t["updated_at"] = datetime.now().isoformat()
+                tasks_file.write_text(json.dumps(data, indent=2))
+                return f"✅ Task #{task_id} marked as done."
+        return f"❌ Task #{task_id} not found."
+
+    # --- /drop <id> - remove a task entirely ---
+    if cmd.startswith("/drop "):
+        try:
+            task_id = int(cmd.split()[1])
+        except (IndexError, ValueError):
+            return "Usage: `/drop <task_id>` — e.g. `/drop 3`"
+        tasks_file = WORKSPACE / "tasks.json"
+        if not tasks_file.exists():
+            return "❌ No tasks file found."
+        data = json.loads(tasks_file.read_text())
+        original_len = len(data["tasks"])
+        data["tasks"] = [t for t in data["tasks"] if t.get("id") != task_id]
+        if len(data["tasks"]) == original_len:
+            return f"❌ Task #{task_id} not found."
+        tasks_file.write_text(json.dumps(data, indent=2))
+        return f"🗑 Task #{task_id} removed."
+
+    # --- /heartbeat - control background task processing ---
+    if cmd == "/heartbeat" or cmd == "/heartbeat status":
+        control_file = WORKSPACE / "heartbeat_control.json"
+        enabled = True  # default
+        if control_file.exists():
+            try:
+                enabled = json.loads(control_file.read_text()).get("enabled", True)
+            except Exception:
+                pass
+        state = "🟢 ON" if enabled else "🔴 OFF"
+        return f"🫀 Heartbeat is {state}.\nUse `/heartbeat on` or `/heartbeat off` to change.\nRun `python heartbeat.py` in a terminal to start the background processor."
+
+    if cmd == "/heartbeat on":
+        control_file = WORKSPACE / "heartbeat_control.json"
+        control_file.write_text(json.dumps({"enabled": True}, indent=2))
+        return "🟢 Heartbeat enabled. Background processor will pick up tasks."
+
+    if cmd == "/heartbeat off":
+        control_file = WORKSPACE / "heartbeat_control.json"
+        control_file.write_text(json.dumps({"enabled": False}, indent=2))
+        return "🔴 Heartbeat disabled. Background processor will pause."
+
+    # --- /status - overview of everything ---
+    if cmd == "/status":
         from capabilities import TIER_LABEL, MAX_TOOL_TURNS, HEARTBEAT_INTERVAL_SEC
         tasks_file = WORKSPACE / "tasks.json"
-        status_lines = [f"🐺 **Beast Status**", f"  Tier: {TIER_LABEL}", f"  Max tool turns: {MAX_TOOL_TURNS}", f"  Heartbeat: every {HEARTBEAT_INTERVAL_SEC // 60} min"]
+        # Heartbeat state
+        control_file = WORKSPACE / "heartbeat_control.json"
+        hb_enabled = True
+        if control_file.exists():
+            try:
+                hb_enabled = json.loads(control_file.read_text()).get("enabled", True)
+            except Exception:
+                pass
+        hb_state = "🟢 ON" if hb_enabled else "🔴 OFF"
+        status_lines = [
+            f"🐺 **Beast Status**",
+            f"  Backend: {_backend_override or os.getenv('LLM_BACKEND', 'lfm')}",
+            f"  Tier: {TIER_LABEL}",
+            f"  Max tool turns: {MAX_TOOL_TURNS}",
+            f"  Heartbeat: {hb_state} (every {HEARTBEAT_INTERVAL_SEC // 60} min)",
+        ]
         if tasks_file.exists():
             try:
                 data = json.loads(tasks_file.read_text())
@@ -620,7 +739,7 @@ Run `python heartbeat.py` — Beast processes queued tasks on a timer.
             except Exception:
                 status_lines.append("  Task queue: error reading tasks.json")
         else:
-            status_lines.append("  Task queue: empty (no tasks.json)")
+            status_lines.append("  Task queue: empty")
         return "\n".join(status_lines)
 
     # Load history and add user message

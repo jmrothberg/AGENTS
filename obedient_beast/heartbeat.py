@@ -44,6 +44,7 @@ from llm import get_llm
 
 WORKSPACE = Path(__file__).parent / "workspace"
 TASKS_FILE = WORKSPACE / "tasks.json"
+HEARTBEAT_CONTROL_FILE = WORKSPACE / "heartbeat_control.json"
 
 # Graceful shutdown flag
 _shutdown = False
@@ -119,11 +120,26 @@ def process_task(task: dict, llm) -> str:
         return error_msg
 
 
+def is_heartbeat_enabled() -> bool:
+    """Check if heartbeat is enabled via the control file (default: True)."""
+    if not HEARTBEAT_CONTROL_FILE.exists():
+        return True
+    try:
+        return json.loads(HEARTBEAT_CONTROL_FILE.read_text()).get("enabled", True)
+    except Exception:
+        return True
+
+
 def run_cycle(llm) -> int:
     """
     Run one heartbeat cycle: check for pending tasks and process them.
+    Respects heartbeat_control.json — if disabled, skips processing.
     Returns the number of tasks processed.
     """
+    # Check control file — /heartbeat off from WhatsApp pauses processing
+    if not is_heartbeat_enabled():
+        return 0
+
     data = load_tasks()
     pending = get_pending_tasks(data)
     
@@ -165,11 +181,14 @@ def heartbeat_loop():
     
     while not _shutdown:
         try:
-            processed = run_cycle(llm)
-            if processed > 0:
-                print(f"[Heartbeat] Processed {processed} task(s).")
+            if not is_heartbeat_enabled():
+                print(f"[Heartbeat] Paused (use /heartbeat on from WhatsApp to resume). Sleeping {HEARTBEAT_INTERVAL_SEC}s...")
             else:
-                print(f"[Heartbeat] No pending tasks. Sleeping {HEARTBEAT_INTERVAL_SEC}s...")
+                processed = run_cycle(llm)
+                if processed > 0:
+                    print(f"[Heartbeat] Processed {processed} task(s).")
+                else:
+                    print(f"[Heartbeat] No pending tasks. Sleeping {HEARTBEAT_INTERVAL_SEC}s...")
             
             # Sleep in small increments so we can respond to shutdown quickly
             for _ in range(HEARTBEAT_INTERVAL_SEC):
