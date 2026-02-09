@@ -73,7 +73,9 @@ from llm import get_llm, ToolCall
 # If MCP is disabled or a server fails, Beast still works fine with
 # its 18 built-in tools — MCP is purely additive.
 
-MCP_ENABLED = os.getenv("MCP_ENABLED", "false").lower() == "true"
+# Default to true — if you have MCP servers configured, they should load.
+# Set MCP_ENABLED=false in .env only if you explicitly want to disable MCP.
+MCP_ENABLED = os.getenv("MCP_ENABLED", "true").lower() == "true"
 _mcp_client = None  # Singleton MCP client, lazily initialized on first use
 
 

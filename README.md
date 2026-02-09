@@ -593,8 +593,8 @@ OPENAI_API_KEY=sk-...
 # WhatsApp Security - Only respond to these numbers
 ALLOWED_NUMBERS=+12025551234
 
-# MCP (optional) - Enable external tool servers
-MCP_ENABLED=false
+# MCP - External tool servers (enabled by default if servers are configured)
+MCP_ENABLED=true
 ```
 
 ## Testing Different LLM Backends
