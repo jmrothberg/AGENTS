@@ -221,13 +221,24 @@ class MCPClient:
         server.process.stdin.write(json.dumps(request) + "\n")
         server.process.stdin.flush()
 
-        # Wait for response from the reader thread (with timeout)
+        # Wait for the matching response from the reader thread (with timeout).
+        # MCP servers may send notifications (no "id" field) — skip those.
+        # We match on request_id to ensure we get the right response.
         timeout = 30
-        try:
-            response = server.response_queue.get(timeout=timeout)
-            return response
-        except queue.Empty:
-            raise TimeoutError(f"No response from {server_name} after {timeout}s")
+        import time
+        deadline = time.time() + timeout
+        while True:
+            remaining = deadline - time.time()
+            if remaining <= 0:
+                raise TimeoutError(f"No response from {server_name} after {timeout}s")
+            try:
+                response = server.response_queue.get(timeout=remaining)
+                # Skip notifications (no "id") — they're server-initiated messages
+                if "id" not in response:
+                    continue
+                return response
+            except queue.Empty:
+                raise TimeoutError(f"No response from {server_name} after {timeout}s")
 
     def _initialize(self, server_name: str):
         """
