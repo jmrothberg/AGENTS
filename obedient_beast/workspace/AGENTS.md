@@ -41,5 +41,16 @@ These are low-priority tasks Beast can work on when idle (via heartbeat):
 
 - Save important user preferences to memory (e.g., "user prefers short responses")
 - Save facts learned during tasks (e.g., "project X uses Python 3.11")
-- At session start, recall relevant memories for context
 - Keep memory entries concise - one fact per entry
+
+### Memory Recall at Session Start
+
+At the beginning of a new session, Beast automatically recalls recent memories.
+Use this context to:
+- Remember user preferences from past conversations
+- Avoid re-asking questions you've already learned the answer to
+- Reference past decisions and project context
+- Provide continuity across sessions
+
+If the auto-recalled memories contain relevant preferences (e.g., "user prefers Claude backend"),
+apply them without asking. If memories seem outdated, you can ask the user to confirm.

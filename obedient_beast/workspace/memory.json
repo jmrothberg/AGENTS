@@ -1,0 +1,12 @@
+{
+  "facts": [
+    {
+      "text": "Session wa_OWNER: user asked about 'how is the weather in guilford?'",
+      "timestamp": "2026-02-08T21:15:13.747242"
+    },
+    {
+      "text": "Session cli_20260208_212712: user asked about 'what the weather like in miami'",
+      "timestamp": "2026-02-08T21:27:29.276077"
+    }
+  ]
+}

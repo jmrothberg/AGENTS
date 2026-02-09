@@ -276,16 +276,33 @@ Each subfolder (e.g., `LFM2.5-1.2B-Thinking/`, `Qwen3-32B/`) is one model. Addit
 
 # Obedient Beast - Personal AI Agent
 
-**A powerful, MCP-native AI agent with computer control and WhatsApp integration.**
+**An AI assistant that lives on your computer and does things for you.**
 
-Obedient Beast is a personal AI assistant designed to be **better than OpenClaw** with:
-- **17 built-in tools** including screenshot, mouse, keyboard, task queue, and memory recall
-- **MCP support** - connect ANY Model Context Protocol server
-- **WhatsApp integration** - message your agent 24/7
-- **Autonomous heartbeat** - Beast can work on tasks by itself on a timer
-- **Local-first** - your data stays on your machine, no internet needed except when you ask
-- **Multiple LLM backends** - local models (any model in your models dir, called "lfm" in config for legacy reasons), OpenAI, or Claude -- switch on the fly
-- **Tiered capabilities** - full power on Claude/OpenAI, restricted on local models
+Think of Beast like a smart intern sitting at your computer. You tell it what you want (by typing in the terminal or sending a WhatsApp message), and it figures out how to do it — reading files, running commands, taking screenshots, searching the web, whatever is needed.
+
+### What can it do?
+
+- **Use your computer** — run terminal commands, read/write/edit files, take screenshots, control the mouse and keyboard
+- **Remember things** — it has persistent memory across conversations ("remember that my server IP is 10.0.1.5")
+- **Work on its own** — give it tasks for later ("remind me to check disk space") and it works on them automatically in the background
+- **Talk via WhatsApp** — message it from your phone anytime, anywhere
+- **Learn new skills** — plug in MCP servers to add abilities like web search, GitHub access, browser automation, and more
+- **Switch brains on the fly** — use a powerful cloud AI (Claude/OpenAI) for complex work, or a local model running on your own machine for privacy
+
+### Two Brain Modes
+
+Beast has two power levels. You pick which AI "brain" it uses:
+
+| | **FULL mode** (Claude or OpenAI) | **LITE mode** (local model on your machine) |
+|---|---|---|
+| **Best for** | Complex tasks, research, multi-step work | Quick tasks, total privacy |
+| **How smart** | Can chain 10 actions together, thinks deeply | Does one thing at a time, keeps it simple |
+| **Privacy** | Messages go to cloud AI | Everything stays on your machine |
+| **Cost** | Uses API credits | Free (your hardware does the work) |
+| **Extra skills** | All MCP servers available | Only the simple MCP servers load |
+| **Switch to it** | `/claude` or `/openai` | `/lfm` |
+
+You can switch between modes anytime, even mid-conversation. Your local model server (the `lfm_thinking.py` or `linux_thinking.py` script from above) must be running in a separate terminal for LITE mode to work.
 
 ---
 
@@ -379,6 +396,19 @@ cd ~/AGENTS/obedient_beast
 
 **Only the WhatsApp bridge** (`node whatsapp/bridge.js`) and **MCP external tools** (`npx` commands) require Node.js.
 
+### What is Node.js?
+
+Node.js is a **JavaScript runtime** — it runs JavaScript code outside of web browsers, similar to how `python` runs Python code:
+
+| Command | What it does |
+|---------|--------------|
+| `python beast.py` | Runs the Python file `beast.py` |
+| `node bridge.js` | Runs the JavaScript file `bridge.js` |
+
+**Why JavaScript for WhatsApp?** The best WhatsApp Web libraries (like Baileys) are written in JavaScript. Rather than rewrite them in Python, we use Node.js to run the existing JavaScript library and have it forward messages to the Python server.
+
+**The bridge is simple:** It connects to WhatsApp, receives your messages, sends them to `server.py` via HTTP, and relays the AI response back to WhatsApp.
+
 Everything else is pure Python:
 - `linux_thinking.py` / `lfm_thinking.py` -- Python
 - `beast.py` -- Python
@@ -411,68 +441,82 @@ The setup script creates a Python virtual environment, installs dependencies, an
 ## Architecture
 
 ```
-┌─────────────────────────────────────────────────────────────┐
-│                    OBEDIENT BEAST                            │
-│                                                              │
-│  ┌─────────────┐  ┌─────────────┐  ┌─────────────────────┐  │
-│  │   LLM Core  │  │   Memory    │  │      Channels       │  │
-│  │(LFM/Claude) │  │ (Sessions)  │  │ (CLI / WhatsApp)    │  │
-│  └──────┬──────┘  └──────┬──────┘  └──────────┬──────────┘  │
-│         └────────────────┼───────────────────-┘              │
-│                          │                                   │
-│         ┌────────────────┴────────────────┐                  │
-│         │          Tool Router            │                  │
-│         └────────────────┬────────────────┘                  │
-└──────────────────────────┼───────────────────────────────────┘
-                           │
-        ┌──────────────────┼──────────────────┐
-        │                  │                  │
-   ┌────┴────┐       ┌─────┴─────┐      ┌─────┴─────┐
-   │Built-in │       │ Computer  │      │    MCP    │
-   │  Tools  │       │  Control  │      │  Servers  │
-   └─────────┘       └───────────┘      └───────────┘
-   • shell           • screenshot       • filesystem
-   • read_file       • mouse_click      • git
-   • write_file      • mouse_move       • memory
-   • edit_file       • keyboard_type    • (any MCP)
-   • list_dir        • keyboard_hotkey
-   • add_task        • get_screen_size
-   • recall_memory   • get_mouse_pos
+                    ┌──────────────────────┐
+                    │    User Interface     │
+                    │  (CLI or WhatsApp)    │
+                    └──────────┬───────────┘
+                               │
+                    ┌──────────▼───────────┐
+                    │     beast.run()       │  ◄── Agent loop: LLM ↔ Tools
+                    │  (beast.py)           │
+                    └──────────┬───────────┘
+                               │
+              ┌────────────────┼────────────────┐
+              │                │                │
+    ┌─────────▼──────┐ ┌──────▼──────┐ ┌───────▼────────┐
+    │   llm.py       │ │ Built-in    │ │  mcp_client.py │
+    │  (3 backends)  │ │ Tools (18)  │ │  (MCP servers) │
+    │ Claude/OpenAI/ │ │             │ │  with 3-tier   │
+    │ Local (lfm)    │ │             │ │  filtering     │
+    └────────────────┘ └──────┬──────┘ └───────┬────────┘
+                              │                │
+              ┌───────────────┼───────┐  ┌─────┴──────────────┐
+              │               │       │  │  MCP Tier System    │
+         ┌────┴───┐  ┌───────┴──┐    │  │                     │
+         │File &  │  │Computer │    │  │ Essential: fs,mem   │
+         │System  │  │Control  │    │  │ Extended: git,sql   │
+         │+ Net   │  │         │    │  │ Cloud: brave,github │
+         └────────┘  └────────-┘    │  └─────────────────────┘
+         • shell     • screenshot   │
+         • read_file • mouse_click  │  ┌─────────────────────┐
+         • write_file• mouse_move   │  │   Memory System     │
+         • edit_file • keyboard_*   │  │                     │
+         • list_dir  • screen_info  │  │ MCP knowledge graph │
+         • fetch_url                │  │ + local JSON backup │
+         • add_task                 │  │ (workspace/memory)  │
+         • recall_memory            │  └─────────────────────┘
+         • install/list/enable_mcp  │
+                                    │
+                        ┌───────────┴──────────┐
+                        │  capabilities.py     │
+                        │  FULL vs LITE tiers  │
+                        └──────────────────────┘
 ```
 
 ## Files (inside `obedient_beast/`)
 
-| File | Description |
-|------|-------------|
-| `beast.py` | Agent loop + 17 built-in tools + CLI mode |
-| `llm.py` | Unified LLM client (LFM/OpenAI/Claude) |
-| `server.py` | Flask HTTP server -- **only needed for WhatsApp** |
-| `capabilities.py` | Tiered settings (FULL for Claude/OpenAI, LITE for local models) |
-| `heartbeat.py` | Autonomous task scheduler (processes task queue on a timer) |
-| `mcp_client.py` | MCP server connection manager |
-| `config/mcp_servers.json` | MCP server configuration (cross-platform paths) |
-| `whatsapp/bridge.js` | Baileys WhatsApp connector -- **requires Node.js** |
-| `workspace/SOUL.md` | Agent personality |
-| `workspace/AGENTS.md` | Standing goals, reasoning templates, task guidance |
-| `workspace/tasks.json` | Task queue for autonomous work |
-| `setup.sh` | One-command setup |
-| `start.sh` | Opens 4 Terminal windows (server, WhatsApp, heartbeat, CLI) |
+| File | Lines | Description |
+|------|-------|-------------|
+| `beast.py` | ~1270 | Agent loop + 18 built-in tools + CLI + slash commands + local memory |
+| `llm.py` | ~405 | Unified LLM client (Claude/OpenAI/local with dual tool-calling) |
+| `server.py` | ~173 | Flask HTTP server -- **only needed for WhatsApp** |
+| `capabilities.py` | ~109 | Tiered settings (FULL/LITE) + MCP tier filtering |
+| `heartbeat.py` | ~263 | Autonomous task scheduler (processes task queue on a timer) |
+| `mcp_client.py` | ~420 | MCP server connection manager with tier filtering |
+| `config/mcp_servers.json` | ~95 | MCP server catalog with 11 servers across 3 tiers |
+| `whatsapp/bridge.js` | ~269 | Baileys WhatsApp connector -- **requires Node.js** |
+| `workspace/SOUL.md` | ~72 | Agent personality + MCP tier awareness + self-upgrade awareness |
+| `workspace/AGENTS.md` | ~57 | Task guidance, reasoning templates, memory recall guidelines |
+| `workspace/memory.json` | auto | Local memory fallback (JSON, auto-created) |
+| `workspace/tasks.json` | auto | Task queue for autonomous work |
+| `setup.sh` | ~250 | One-command setup |
+| `start.sh` | ~200 | Opens 4 Terminal windows (server, WhatsApp, heartbeat, CLI) |
 
-## Built-in Tools (17 total)
+## Built-in Tools (18 total)
 
 ### File & System Tools
 | Tool | Description |
 |------|-------------|
-| `shell` | Execute any terminal command |
+| `shell` | Execute any terminal command (with configurable timeout, max 300s) |
 | `read_file` | Read file contents |
-| `write_file` | Create/write files |
+| `write_file` | Create/write files (auto-creates parent dirs) |
 | `edit_file` | Find & replace text in files |
 | `list_dir` | List directory contents |
 
 ### Computer Control Tools
 | Tool | Description |
 |------|-------------|
-| `screenshot` | Capture the screen |
+| `screenshot` | Capture the screen (auto-sends via WhatsApp) |
 | `mouse_click` | Click at x,y coordinates |
 | `mouse_move` | Move cursor to x,y |
 | `keyboard_type` | Type text |
@@ -484,36 +528,60 @@ The setup script creates a Python virtual environment, installs dependencies, an
 | Tool | Description |
 |------|-------------|
 | `install_mcp_server` | Add new MCP server capabilities |
-| `list_mcp_servers` | Show configured MCP servers |
+| `list_mcp_servers` | Show configured MCP servers with tier info |
 | `enable_mcp_server` | Enable/disable an MCP server |
 
 ### Autonomous Agent Tools
 | Tool | Description |
 |------|-------------|
 | `add_task` | Add/update/complete tasks in the queue |
-| `recall_memory` | Search persistent memory for past context |
+| `recall_memory` | Search persistent memory (MCP + local JSON fallback) |
 
-## MCP Tools (Optional)
+### Network Tools
+| Tool | Description |
+|------|-------------|
+| `fetch_url` | HTTP GET/POST any URL (stdlib, no deps, 4000 char truncation) |
 
-Enable external tool servers by setting `MCP_ENABLED=true` in `.env`.
+## MCP Server Catalog (3-Tier System)
 
-MCP servers are launched via `npx` (requires Node.js). Beast starts them automatically on launch.
+Enable MCP by setting `MCP_ENABLED=true` in `.env`. Servers are launched via `npx` (requires Node.js).
 
-| MCP Server | What it does | Local? |
-|------------|--------------|--------|
-| **filesystem** | Read/write files anywhere | Yes |
-| **git** | Commit, diff, branch, status | Yes |
-| **memory** | Persistent knowledge graph | Yes |
-| **sequential-thinking** | Complex reasoning | Yes |
-| **brave-search** | Web search | No (API key) |
+**All MCP tiers load in both LITE and FULL mode.** Local LLMs need access to cloud tools like brave-search for web queries. The tier labels are organizational only. LITE mode limits tool-calling behavior (single-tool mode, 2 max turns) to prevent loops — it doesn't restrict which servers load.
 
-Edit `config/mcp_servers.json` to enable/configure servers. Paths are cross-platform -- set your macOS and Linux home directories in the `"paths"` section and use `{home}` / `{agents}` placeholders in commands.
+### Essential Tier (always loaded)
+
+| Server | Install Command | What It Does |
+|--------|----------------|--------------|
+| **filesystem** | `npx -y @modelcontextprotocol/server-filesystem /Users/you` | File search/move beyond built-ins |
+| **memory** | `npx -y @modelcontextprotocol/server-memory` | Persistent knowledge graph |
+| **time** | `npx -y @modelcontextprotocol/server-time` | Time/timezone queries (1-2 tools) |
+| **fetch** | `npx -y @modelcontextprotocol/server-fetch` | HTTP fetching via MCP |
+
+### Extended Tier (FULL mode only)
+
+| Server | Install Command | What It Does |
+|--------|----------------|--------------|
+| **sqlite** | `npx -y @modelcontextprotocol/server-sqlite` | Local database queries |
+| **git** | `npx -y @modelcontextprotocol/server-git` | Git operations (commit, diff, branch) |
+| **sequential-thinking** | `npx -y @modelcontextprotocol/server-sequential-thinking` | Step-by-step complex reasoning |
+| **playwright** | `npx -y @anthropic/mcp-server-playwright` | Full browser automation |
+
+### Cloud-Only Tier (FULL mode + API keys)
+
+| Server | Install Command | What It Needs |
+|--------|----------------|---------------|
+| **brave-search** | `npx -y @modelcontextprotocol/server-brave-search` | `BRAVE_API_KEY` |
+| **github** | `npx -y @modelcontextprotocol/server-github` | `GITHUB_TOKEN` |
+| **slack** | `npx -y @anthropic/mcp-server-slack` | `SLACK_TOKEN` |
+
+Edit `config/mcp_servers.json` to enable/configure servers. Use `/skills` in Beast to see the full catalog with install commands.
 
 ## Configuration (.env)
 
 ```bash
 # LLM Backend: "lfm" (local models — legacy name), "openai", or "claude"
-LLM_BACKEND=claude
+# Default is "lfm" — tries localhost:8000 first, then LFM_URL from below
+LLM_BACKEND=lfm
 
 # Local model server URL (when LLM_BACKEND=lfm)
 LFM_URL=http://192.168.1.100:8000
@@ -572,8 +640,10 @@ Claude and OpenAI handle multi-tool calls properly and get the full tier automat
 | `/heartbeat` | Show heartbeat status |
 | `/clear` | Clear chat history only |
 | `/clear tasks` | Clear task queue only |
-| `/clear all` | Clear everything |
+| `/clear memory` | Clear saved memories (local JSON) |
+| `/clear all` | Clear everything (history + tasks + memory) |
 | `/tools` | List all available tools |
+| `/skills` | MCP server catalog with install commands (3 tiers) |
 
 **CLI-only commands:**
 
@@ -644,6 +714,21 @@ python heartbeat.py --status     # Show task queue
 - `/heartbeat off` — pause processing (heartbeat stays running but skips tasks)
 - `/heartbeat` — check if it's on or off
 
+## What Beast Stores (and How to Clear It)
+
+Beast saves 4 types of data. Each can be cleared independently:
+
+| What | Where it lives | What it holds | How to clear |
+|------|---------------|---------------|-------------|
+| **Chat history** | `sessions/*.jsonl` | Every conversation (CLI + WhatsApp) | `/clear` |
+| **Task queue** | `workspace/tasks.json` | To-do list for the heartbeat | `/clear tasks` |
+| **Local memory** | `workspace/memory.json` | Facts Beast remembers (up to 200, auto-capped) | `/clear memory` |
+| **MCP knowledge graph** | External MCP server | Rich knowledge graph (if MCP memory enabled) | Ask Beast: "forget everything in memory" |
+
+- `/clear all` wipes chat history + tasks + local memory in one command
+- The MCP knowledge graph is separate because it runs as an external server — Beast can't directly delete its data with a slash command, but you can ask Beast to do it via the MCP tools
+- `/new` (CLI only) starts a fresh conversation **without** deleting anything
+
 ## Capability Tiers
 
 Beast automatically adjusts its power based on which LLM backend is active:
@@ -655,6 +740,7 @@ Beast automatically adjusts its power based on which LLM backend is active:
 | Heartbeat interval | 5 min | 10 min |
 | Tasks per heartbeat cycle | 3 | 1 |
 | Memory detail saved | Full context | Key facts only |
+| MCP tiers loaded | All (Essential+Extended+Cloud) | All (same — local LLM needs web search etc.) |
 
 Tiers are set in `capabilities.py` and auto-detect from `LLM_BACKEND` in `.env`.
 
@@ -708,11 +794,24 @@ cd AGENTS/obedient_beast
 obedient_beast/whatsapp/auth_info/  → Inside the AGENTS repo
 ```
 
+### @beast in Group Chats
+
+Beast normally stays quiet in shared group chats (groups with other people). To summon Beast for a single message, start it with `@beast`:
+
+```
+@beast check disk space
+@beast what's the weather in NYC
+```
+
+- Only YOU (the phone owner) can use `@beast` — other group members can't trigger it
+- Beast responds in the group chat, then goes quiet again
+- Works in any group, even those not in `ALLOWED_GROUPS`
+
 ### WhatsApp Security
 
 - Beast uses YOUR WhatsApp account (not a separate bot)
 - Set `ALLOWED_NUMBERS` to restrict who can trigger responses
-- Group messages only respond to the account owner
+- Group messages only respond to the account owner (or via `@beast`)
 - DMs check against the allowlist
 
 ## Recommended Models for Tool Calling
@@ -728,14 +827,17 @@ obedient_beast/whatsapp/auth_info/  → Inside the AGENTS repo
 
 | Feature | OpenClaw | Obedient Beast |
 |---------|----------|----------------|
-| MCP Support | ❌ Custom only | ✅ Native MCP |
-| Tool Ecosystem | Closed | Open (any MCP) |
-| Computer Control | Via plugins | Built-in |
+| MCP Support | ❌ Custom only | ✅ Native MCP with 3-tier catalog (11 servers) |
+| Tool Ecosystem | Closed | Open (any MCP + 18 built-in) |
+| Computer Control | Via plugins | Built-in (screenshot, mouse, keyboard) |
 | Autonomous Tasks | Cron/webhooks | Heartbeat + task queue |
-| Persistent Memory | Via plugins | Built-in (MCP memory) |
+| Persistent Memory | Via plugins | Built-in (MCP graph + local JSON fallback) |
+| Web/HTTP Fetching | Via plugins | Built-in `fetch_url` + MCP fetch server |
 | Backend Switching | ❌ | `/claude` `/openai` `/lfm` live |
 | Capability Tiers | ❌ | Auto (FULL/LITE by backend) |
-| Codebase Size | 150k+ lines | <1.5k lines |
+| MCP Tier Organization | ❌ | 3-tier catalog (Essential/Extended/Cloud) |
+| Auto Memory Recall | ❌ | ✅ At session start |
+| Codebase Size | 150k+ lines | ~2.7k lines (heavily commented) |
 | Local-first | ✅ | ✅ |
 | Setup | Complex | One command |
 

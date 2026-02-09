@@ -5,16 +5,35 @@ Heartbeat - Autonomous Task Scheduler for Beast
 Runs as a background loop (or standalone script) that periodically
 checks the task queue and processes pending tasks via beast.run().
 
+How it works:
+~~~~~~~~~~~~~
+1. Heartbeat wakes up every N minutes (5 min FULL, 10 min LITE)
+2. Checks workspace/tasks.json for pending tasks
+3. Picks the highest-priority task and feeds it to beast.run()
+4. Beast processes it (using tools as needed) and marks it done/failed
+5. Goes back to sleep
+
+Graceful shutdown pattern:
+~~~~~~~~~~~~~~~~~~~~~~~~~~
+The heartbeat uses signal handlers (SIGINT/SIGTERM) to set a _shutdown flag.
+Instead of sleeping for the full interval in one call, it sleeps in 1-second
+increments and checks the flag each time. This means Ctrl+C stops the
+heartbeat within ~1 second instead of waiting for the full 5/10-minute interval.
+
+Integration with /heartbeat on|off:
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+The slash commands in beast.py write to workspace/heartbeat_control.json:
+    {"enabled": true}  or  {"enabled": false}
+The heartbeat checks this file at the start of each cycle. If disabled,
+it skips processing but keeps running (checking again on the next cycle).
+This lets you pause/resume via WhatsApp without restarting the process.
+
 Inspired by Clawdbot/OpenClaw's autonomous agent cron system.
 
 Usage:
     python heartbeat.py              # Run heartbeat loop (foreground)
     python heartbeat.py --once       # Process one cycle and exit
     python heartbeat.py --status     # Show task queue status
-
-The heartbeat respects capability tiers:
-    - FULL mode (Claude/OpenAI): processes multiple tasks per cycle
-    - LITE mode (local LFM): processes one task per cycle, longer interval
 """
 
 import os
@@ -46,12 +65,15 @@ WORKSPACE = Path(__file__).parent / "workspace"
 TASKS_FILE = WORKSPACE / "tasks.json"
 HEARTBEAT_CONTROL_FILE = WORKSPACE / "heartbeat_control.json"
 
-# Graceful shutdown flag
+# Graceful shutdown flag — set by signal handler, checked in sleep loop
 _shutdown = False
 
 
 def _handle_signal(signum, frame):
-    """Handle SIGINT/SIGTERM for graceful shutdown."""
+    """
+    Handle SIGINT (Ctrl+C) and SIGTERM for graceful shutdown.
+    Sets the _shutdown flag so the main loop exits on the next 1-second check.
+    """
     global _shutdown
     print("\n[Heartbeat] Shutting down gracefully...")
     _shutdown = True
@@ -84,11 +106,12 @@ def get_pending_tasks(data: dict) -> list:
 def process_task(task: dict, llm) -> str:
     """
     Process a single task by calling beast.run() with the task description.
-    Returns the response from Beast.
+    Beast will execute tools, mark the task done/failed, and return a response.
+    Uses a dedicated "heartbeat_auto" session to avoid polluting user sessions.
     """
     task_id = task.get("id", "?")
     description = task.get("description", "No description")
-    
+
     # Build a prompt that tells Beast this is an autonomous task
     prompt = (
         f"[AUTONOMOUS TASK #{task_id}] {description}\n"
@@ -97,11 +120,11 @@ def process_task(task: dict, llm) -> str:
         f"When done, use add_task with task_id={task_id} and status=done to mark it complete. "
         f"If it fails, use add_task with task_id={task_id} and status=failed."
     )
-    
+
     session_id = "heartbeat_auto"
-    
+
     print(f"[Heartbeat] Processing task #{task_id}: {description[:60]}...")
-    
+
     try:
         response = run(prompt, session_id, llm)
         print(f"[Heartbeat] Task #{task_id} response: {response[:100]}...")
@@ -109,7 +132,7 @@ def process_task(task: dict, llm) -> str:
     except Exception as e:
         error_msg = f"Error processing task #{task_id}: {e}"
         print(f"[Heartbeat] {error_msg}", file=sys.stderr)
-        # Mark task as failed
+        # Mark task as failed directly (in case Beast couldn't do it)
         data = load_tasks()
         for t in data["tasks"]:
             if t.get("id") == task_id:
@@ -121,7 +144,11 @@ def process_task(task: dict, llm) -> str:
 
 
 def is_heartbeat_enabled() -> bool:
-    """Check if heartbeat is enabled via the control file (default: True)."""
+    """
+    Check if heartbeat is enabled via the control file.
+    Default: True (enabled) if no control file exists.
+    The /heartbeat on|off slash commands write to this file.
+    """
     if not HEARTBEAT_CONTROL_FILE.exists():
         return True
     try:
@@ -136,40 +163,39 @@ def run_cycle(llm) -> int:
     Respects heartbeat_control.json — if disabled, skips processing.
     Returns the number of tasks processed.
     """
-    # Check control file — /heartbeat off from WhatsApp pauses processing
     if not is_heartbeat_enabled():
         return 0
 
     data = load_tasks()
     pending = get_pending_tasks(data)
-    
+
     if not pending:
         return 0
-    
-    # Process up to HEARTBEAT_TASKS_PER_CYCLE tasks
+
+    # Process up to HEARTBEAT_TASKS_PER_CYCLE tasks per cycle
     tasks_to_process = pending[:HEARTBEAT_TASKS_PER_CYCLE]
     processed = 0
-    
+
     for task in tasks_to_process:
         if _shutdown:
-            break
+            break  # Respect shutdown flag between tasks
         process_task(task, llm)
         processed += 1
-    
+
     return processed
 
 
 def heartbeat_loop():
     """
-    Main heartbeat loop. Runs until interrupted.
+    Main heartbeat loop. Runs until interrupted (Ctrl+C or SIGTERM).
     Checks the task queue every HEARTBEAT_INTERVAL_SEC seconds.
     """
     # Register signal handlers for graceful shutdown
     signal.signal(signal.SIGINT, _handle_signal)
     signal.signal(signal.SIGTERM, _handle_signal)
-    
+
     llm = get_llm()
-    
+
     print("=" * 60)
     print("🫀 Beast Heartbeat - Autonomous Scheduler")
     print(f"   Tier: {TIER_LABEL}")
@@ -178,7 +204,7 @@ def heartbeat_loop():
     print(f"   Task file: {TASKS_FILE}")
     print("=" * 60)
     print("[Heartbeat] Running... (Ctrl+C to stop)\n")
-    
+
     while not _shutdown:
         try:
             if not is_heartbeat_enabled():
@@ -189,18 +215,20 @@ def heartbeat_loop():
                     print(f"[Heartbeat] Processed {processed} task(s).")
                 else:
                     print(f"[Heartbeat] No pending tasks. Sleeping {HEARTBEAT_INTERVAL_SEC}s...")
-            
-            # Sleep in small increments so we can respond to shutdown quickly
+
+            # Sleep in 1-second increments so we can respond to shutdown quickly.
+            # Instead of time.sleep(300), we do 300 x time.sleep(1) and check
+            # the _shutdown flag each iteration. This gives ~1s shutdown latency.
             for _ in range(HEARTBEAT_INTERVAL_SEC):
                 if _shutdown:
                     break
                 time.sleep(1)
-        
+
         except Exception as e:
             print(f"[Heartbeat] Cycle error: {e}", file=sys.stderr)
             # Sleep before retrying to avoid tight error loops
             time.sleep(30)
-    
+
     print("[Heartbeat] Stopped.")
 
 
@@ -208,17 +236,17 @@ def show_status():
     """Print the current task queue status."""
     data = load_tasks()
     tasks = data.get("tasks", [])
-    
+
     if not tasks:
         print("Task queue is empty.")
         return
-    
+
     print(f"Task Queue ({len(tasks)} total):")
     print("-" * 50)
     for t in tasks:
         status_icon = {"pending": "⏳", "done": "✅", "failed": "❌"}.get(t.get("status"), "?")
         print(f"  {status_icon} #{t.get('id', '?')} [{t.get('priority', '?')}] {t.get('description', 'No description')[:50]}")
-    
+
     pending = [t for t in tasks if t.get("status") == "pending"]
     print(f"\n{len(pending)} pending task(s).")
 

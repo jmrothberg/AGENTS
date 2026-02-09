@@ -4,37 +4,92 @@
       "enabled": true,
       "command": "npx -y @modelcontextprotocol/server-filesystem /Users/jonathanrothberg",
       "description": "Read/write/search files anywhere on your computer",
-      "local": true
-    },
-    "git": {
-      "enabled": true,
-      "command": "npx -y @modelcontextprotocol/server-git --repository /Users/jonathanrothberg/AGENTS/AGENTS",
-      "description": "Git operations: commit, diff, log, branch, status",
       "local": true,
-      "note": "Disabled - package has startup issues. Beast can use shell tool for git commands."
+      "tier": "essential"
     },
     "memory": {
       "enabled": true,
       "command": "npx -y @modelcontextprotocol/server-memory",
       "description": "Persistent knowledge graph - Beast remembers things forever",
-      "local": true
+      "local": true,
+      "tier": "essential"
+    },
+    "time": {
+      "enabled": false,
+      "command": "npx -y @modelcontextprotocol/server-time",
+      "description": "Time and timezone queries (1-2 tools, trivial for any LLM)",
+      "local": true,
+      "tier": "essential"
+    },
+    "fetch": {
+      "enabled": false,
+      "command": "npx -y @modelcontextprotocol/server-fetch",
+      "description": "HTTP fetching via MCP (works on LAN too). Beast has a built-in fetch_url tool as well.",
+      "local": true,
+      "tier": "essential"
+    },
+    "git": {
+      "enabled": false,
+      "command": "npx -y @modelcontextprotocol/server-git --repository /Users/jonathanrothberg/Agents",
+      "description": "Git operations: commit, diff, log, branch, status",
+      "local": true,
+      "tier": "extended",
+      "note": "Beast can also use shell tool for git commands. Enable this for richer git integration."
+    },
+    "sqlite": {
+      "enabled": false,
+      "command": "npx -y @modelcontextprotocol/server-sqlite",
+      "description": "Local SQLite database queries and management",
+      "local": true,
+      "tier": "extended"
     },
     "sequential-thinking": {
       "enabled": false,
       "command": "npx -y @modelcontextprotocol/server-sequential-thinking",
       "description": "Complex reasoning - breaks down hard problems step by step",
       "local": true,
-      "note": "Only useful in FULL tier (Claude/OpenAI). LITE tier uses AGENTS.md reasoning prompts instead. Enable with: capabilities.SEQUENTIAL_THINKING_ENABLED"
+      "tier": "extended",
+      "note": "Only useful in FULL tier (Claude/OpenAI). LITE tier uses AGENTS.md reasoning prompts instead."
+    },
+    "playwright": {
+      "enabled": false,
+      "command": "npx -y @anthropic/mcp-server-playwright",
+      "description": "Full browser automation - navigate, click, type, screenshot web pages",
+      "local": true,
+      "tier": "extended"
     },
     "brave-search": {
       "enabled": true,
       "command": "npx -y @modelcontextprotocol/server-brave-search",
       "description": "Web search capabilities using Brave Search API",
       "local": false,
+      "tier": "cloud",
       "env": {
         "BRAVE_API_KEY": "BSA_RItMbh9nmgrLmO7N2aHRnlwA7GS"
       }
+    },
+    "github": {
+      "enabled": false,
+      "command": "npx -y @modelcontextprotocol/server-github",
+      "description": "GitHub operations: issues, PRs, repos, code search",
+      "local": false,
+      "tier": "cloud",
+      "env": {
+        "GITHUB_TOKEN": ""
+      },
+      "note": "Needs GITHUB_TOKEN env var. Generate at https://github.com/settings/tokens"
+    },
+    "slack": {
+      "enabled": false,
+      "command": "npx -y @anthropic/mcp-server-slack",
+      "description": "Slack messaging: read/send messages, list channels",
+      "local": false,
+      "tier": "cloud",
+      "env": {
+        "SLACK_TOKEN": ""
+      },
+      "note": "Needs SLACK_TOKEN env var (xoxb-... bot token)"
     }
   },
-  "_comment": "Set 'enabled': true for servers you want to use. All are local except brave-search."
+  "_comment": "MCP servers organized by tier (labels are for documentation only — all tiers load in both LITE and FULL mode). Set 'enabled': true for servers you want."
 }
