@@ -47,12 +47,25 @@ Streaming test client for the server mode.
 ## Usage
 
 ```bash
-# macOS (Apple Silicon)
+# Interactive (model selection menu)
 python lfm_thinking.py
+
+# Headless / pm2 (no interactive prompts)
+python lfm_thinking.py --model latest --server          # Serve the most recently downloaded model
+python lfm_thinking.py --model Qwen3.5 --server         # Serve model matching "Qwen3.5"
+python lfm_thinking.py --model GLM --server --port 9000  # Custom port
+python lfm_thinking.py --list                            # List available models and exit
 
 # Linux (NVIDIA GPU)
 python linux_thinking.py
 ```
+
+| Flag | Description |
+|------|-------------|
+| `--model NAME` | Skip model menu. Use `latest` for most recent, or a name/substring to match |
+| `--server` | Start in server mode automatically (no interactive prompt) |
+| `--port PORT` | Server port (default: 8000) |
+| `--list` | List available models with dates and exit |
 
 ### Step 1: Select Model
 The script scans your model directories and presents a numbered menu of all available models. For example:
@@ -111,8 +124,10 @@ Access URLs:
 
 | Endpoint | Method | Description |
 |----------|--------|-------------|
-| `/` | GET | Health check |
-| `/v1/models` | GET | List available models |
+| `/` | GET | Health check (shows current model) |
+| `/v1/models` | GET | Currently loaded model (OpenAI format) |
+| `/v1/models/available` | GET | All models in the models directory |
+| `/v1/models/switch` | POST | Hot-swap model: `{"model": "latest"}` or `{"model": "Qwen3"}` |
 | `/v1/chat/completions` | POST | Chat completions (OpenAI format) |
 
 ### Example: curl
@@ -325,7 +340,7 @@ YOU (terminal)  -->  beast.py  -->  LLM server (port 8000)  -->  response
 YOU (WhatsApp)  -->  bridge.js  -->  server.py  -->  beast.py  -->  LLM server  -->  response
 ```
 
-The LLM server (`linux_thinking.py` on Linux, `lfm_thinking.py` on macOS) is **always separate** -- you start it in its own terminal first, pick which model to serve, then start Beast.
+The LLM server (`linux_thinking.py` on Linux, `lfm_thinking.py` on macOS) is **always separate** -- you start it in its own terminal (interactive) or via pm2 with `--model latest --server` (headless).
 
 If you use Claude or OpenAI as backend instead of local LLM, you do NOT need the LLM server at all -- Beast talks directly to the cloud API.
 
@@ -389,6 +404,76 @@ cd ~/AGENTS/obedient_beast
 ./start.sh status   # Check what's running
 ./start.sh cli      # Start just the CLI (no WhatsApp)
 ```
+
+### Using pm2 (recommended — auto-restart & survive reboots)
+
+pm2 keeps the 3 background daemons running permanently. They auto-restart on crash and auto-start on Mac reboot. Much more reliable than leaving terminal windows open.
+
+```bash
+# One-time setup
+sudo npm install -g pm2
+
+# Start the 3 daemons (use your venv python for the Python processes)
+pm2 start ~/AGENTS/obedient_beast/server.py \
+    --name beast-server \
+    --interpreter ~/AGENTS/.venv/bin/python3 \
+    --cwd ~/AGENTS/obedient_beast
+
+pm2 start ~/AGENTS/obedient_beast/whatsapp/bridge.js \
+    --name whatsapp-bridge \
+    --cwd ~/AGENTS/obedient_beast/whatsapp
+
+pm2 start ~/AGENTS/obedient_beast/heartbeat.py \
+    --name beast-heartbeat \
+    --interpreter ~/AGENTS/.venv/bin/python3 \
+    --cwd ~/AGENTS/obedient_beast
+
+# Save process list & enable auto-start on reboot
+pm2 save
+pm2 startup    # Follow the sudo command it prints
+```
+
+**Useful pm2 commands:**
+
+| Command | What it does |
+|---------|-------------|
+| `pm2 status` | See all processes |
+| `pm2 logs` | Tail all logs live |
+| `pm2 logs beast-server` | Logs for one process |
+| `pm2 restart all` | Restart everything |
+| `pm2 restart whatsapp-bridge` | Restart one process |
+| `pm2 stop whatsapp-bridge` | Stop one process |
+
+**Note:** `beast.py` (the CLI) is interactive and cannot run under pm2. `lfm_thinking.py` can now run under pm2 using the `--model` and `--server` flags:
+
+```bash
+# Add the local model server to pm2 (serves the most recent model)
+pm2 start ~/AGENTS/lfm_thinking.py \
+    --name lfm-server \
+    --interpreter ~/AGENTS/.venv/bin/python3 \
+    --cwd ~/AGENTS \
+    -- --model latest --server
+
+# Or serve a specific model
+pm2 start ~/AGENTS/lfm_thinking.py \
+    --name lfm-server \
+    --interpreter ~/AGENTS/.venv/bin/python3 \
+    --cwd ~/AGENTS \
+    -- --model Qwen3.5 --server --port 8000
+```
+
+**Switch the model without restarting** (while the server is running):
+```bash
+# Via the API
+curl -X POST http://localhost:8000/v1/models/switch \
+    -H "Content-Type: application/json" \
+    -d '{"model": "GLM"}'
+
+# See all available models
+curl http://localhost:8000/v1/models/available
+```
+
+**WhatsApp bridge disconnects:** If the bridge is not running for ~14 days, WhatsApp unlinks the device. Running the bridge under pm2 prevents this since it stays connected 24/7 and auto-reconnects on temporary disconnects.
 
 ---
 

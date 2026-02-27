@@ -10,7 +10,12 @@ Dynamically scans model directories and serves any compatible model locally.
 Model type (text vs vision) is auto-detected from config.json.
 Filename is "lfm_thinking.py" for legacy reasons (started with LFM-2.5 models).
 
-USAGE: python lfm_thinking.py
+USAGE:
+  python lfm_thinking.py                          # Interactive model selection
+  python lfm_thinking.py --model latest --server   # Serve most recent model (pm2-friendly)
+  python lfm_thinking.py --model Qwen3 --server    # Serve model matching "Qwen3"
+  python lfm_thinking.py --model latest --server --port 9000
+  python lfm_thinking.py --list                    # List available models and exit
 """
 
 import platform
@@ -182,12 +187,96 @@ def scan_mlx_models(models_dir):
 MLX_MODELS = scan_mlx_models(MLX_MODELS_DIR)
 
 # ============================================================================
+# CLI Arguments (enables headless/pm2 operation)
+# ============================================================================
+parser = argparse.ArgumentParser(description="Local Model Inference Server")
+parser.add_argument("--model", type=str, default=None,
+    help='Model to load: "latest" for most recent, or a name/substring to match (e.g. "Qwen3")')
+parser.add_argument("--server", action="store_true",
+    help="Start in server mode automatically (no interactive prompt)")
+parser.add_argument("--port", type=int, default=8000,
+    help="Server port (default: 8000)")
+parser.add_argument("--list", action="store_true",
+    help="List available models and exit")
+cli_args = parser.parse_args()
+
+def resolve_model_choice(model_arg):
+    """
+    Resolve --model argument to a model key from MLX_MODELS.
+    - "latest": pick the most recently modified model directory
+    - number (e.g. "3"): pick by menu number
+    - string: fuzzy match against model folder names (case-insensitive)
+    Returns the model key (string number) or None if no match.
+    """
+    if not MLX_MODELS:
+        print("Error: No models found in", MLX_MODELS_DIR)
+        exit(1)
+
+    # "latest" — pick the model directory with the most recent modification time
+    if model_arg.lower() == "latest":
+        newest_key = None
+        newest_mtime = 0
+        for key, (path, _, desc) in MLX_MODELS.items():
+            mtime = os.path.getmtime(path)
+            if mtime > newest_mtime:
+                newest_mtime = mtime
+                newest_key = key
+        if newest_key:
+            _, _, desc = MLX_MODELS[newest_key]
+            print(f"Auto-selected latest model: {desc}")
+        return newest_key
+
+    # Direct menu number (e.g. "3")
+    if model_arg in MLX_MODELS:
+        return model_arg
+
+    # Substring match against folder names (case-insensitive)
+    model_arg_lower = model_arg.lower()
+    matches = []
+    for key, (path, _, desc) in MLX_MODELS.items():
+        folder_name = os.path.basename(path).lower()
+        if model_arg_lower in folder_name:
+            matches.append(key)
+
+    if len(matches) == 1:
+        _, _, desc = MLX_MODELS[matches[0]]
+        print(f"Auto-selected model: {desc}")
+        return matches[0]
+    elif len(matches) > 1:
+        print(f"Multiple models match '{model_arg}':")
+        for key in matches:
+            _, _, desc = MLX_MODELS[key]
+            print(f"  {key}. {desc}")
+        print("Be more specific or use the menu number.")
+        exit(1)
+    else:
+        print(f"No model matching '{model_arg}'. Available models:")
+        for key, (_, _, desc) in MLX_MODELS.items():
+            print(f"  {key}. {desc}")
+        exit(1)
+
+# Handle --list
+if cli_args.list:
+    print("=" * 50)
+    print("Available Models")
+    print("=" * 50)
+    for key, (path, model_type, desc) in MLX_MODELS.items():
+        mtime = os.path.getmtime(path)
+        from datetime import datetime
+        date_str = datetime.fromtimestamp(mtime).strftime("%Y-%m-%d")
+        vl_tag = " [VL]" if model_type == "vision" else ""
+        print(f"  {key}. {desc}{vl_tag}  ({date_str})")
+    print("=" * 50)
+    exit(0)
+
+# ============================================================================
 # OpenAI-Compatible Server Mode
 # ============================================================================
 def run_server_mode(model, tokenizer, processor, model_name, model_type, host="0.0.0.0", port=8000):
     """
     Run the model as an OpenAI-compatible API server.
     Accessible on local network at http://<your-ip>:port/v1/chat/completions
+    Supports hot-swapping models via POST /v1/models/switch
     """
     try:
         from fastapi import FastAPI, HTTPException
@@ -202,7 +291,16 @@ def run_server_mode(model, tokenizer, processor, model_name, model_type, host="0
         print("Server mode requires fastapi and uvicorn.")
         print("Install with: pip install fastapi uvicorn")
         return
-    
+
+    # Mutable state so model can be hot-swapped via /v1/models/switch
+    state = {
+        "model": model,
+        "tokenizer": tokenizer,
+        "processor": processor,
+        "model_name": model_name,
+        "model_type": model_type,
+    }
+
     app = FastAPI(title="Local Model Server", description="OpenAI-compatible API for local models")
     
     # Allow CORS for local network access
@@ -221,7 +319,7 @@ def run_server_mode(model, tokenizer, processor, model_name, model_type, host="0
         tool_calls: Optional[List[dict]] = None
     
     class ChatCompletionRequest(BaseModel):
-        model: str = model_name
+        model: str = "auto"
         messages: List[ChatMessage]
         temperature: Optional[float] = 0.7
         max_tokens: Optional[int] = 512
@@ -387,37 +485,108 @@ def run_server_mode(model, tokenizer, processor, model_name, model_type, host="0
     @app.get("/")
     async def root():
         """Health check endpoint."""
-        return {"status": "ok", "model": model_name, "type": model_type}
-    
+        return {"status": "ok", "model": state["model_name"], "type": state["model_type"]}
+
     @app.get("/v1/models")
     async def list_models():
         """List available models (OpenAI-compatible)."""
         return ModelsResponse(
-            data=[ModelInfo(id=model_name, created=int(time.time()))]
+            data=[ModelInfo(id=state["model_name"], created=int(time.time()))]
         )
-    
+
+    @app.get("/v1/models/available")
+    async def available_models():
+        """List all models that can be loaded (from MLX_Models directory)."""
+        available = []
+        for key, (path, mtype, desc) in MLX_MODELS.items():
+            mtime = os.path.getmtime(path)
+            available.append({
+                "key": key,
+                "name": os.path.basename(path),
+                "description": desc,
+                "type": mtype,
+                "modified": mtime,
+                "active": (os.path.basename(path) in state["model_name"]),
+            })
+        return {"models": available, "current": state["model_name"]}
+
+    class SwitchRequest(BaseModel):
+        model: str  # "latest", menu number, or name substring
+
+    @app.post("/v1/models/switch")
+    async def switch_model_endpoint(req: SwitchRequest):
+        """
+        Hot-swap the currently loaded model.
+        POST {"model": "latest"} or {"model": "Qwen3"} or {"model": "3"}
+        The old model is unloaded and the new one loaded in its place.
+        """
+        new_key = resolve_model_choice(req.model)
+        if new_key is None:
+            raise HTTPException(status_code=404, detail=f"No model matching '{req.model}'")
+
+        new_path, new_type, new_desc = MLX_MODELS[new_key]
+
+        # Skip if already loaded
+        if os.path.basename(new_path) in state["model_name"]:
+            return {"status": "already_loaded", "model": state["model_name"]}
+
+        print(f"\n{'='*60}")
+        print(f"Switching model: {state['model_name']} -> {new_desc}")
+        print(f"{'='*60}")
+
+        # Unload current model
+        del state["model"]
+        if state["tokenizer"] is not None:
+            del state["tokenizer"]
+        if state["processor"] is not None:
+            del state["processor"]
+        clear_model_memory()
+
+        # Load new model
+        use_vl = (new_type == "vision")
+        if use_vl and MLX_VLM_AVAILABLE:
+            print(f"Loading {new_desc} (MLX Vision)...")
+            new_model, new_processor = vlm_load(new_path)
+            state["model"] = new_model
+            state["processor"] = new_processor
+            state["tokenizer"] = None
+        elif not use_vl and MLX_LM_AVAILABLE:
+            print(f"Loading {new_desc} (MLX Text)...")
+            new_model, new_tokenizer = lm_load(new_path)
+            state["model"] = new_model
+            state["tokenizer"] = new_tokenizer
+            state["processor"] = None
+        else:
+            raise HTTPException(status_code=500, detail="Required MLX library not available for this model type")
+
+        state["model_name"] = new_desc
+        state["model_type"] = new_type
+
+        print(f"Model switched to: {new_desc}")
+        return {"status": "switched", "model": new_desc, "type": new_type}
+
     # ----------------------------------------------------------------
     # Streaming generator for SSE (Server-Sent Events)
     # ----------------------------------------------------------------
     async def stream_mlx_text(user_message: str, max_tokens: int) -> AsyncGenerator[str, None]:
         """Stream tokens from MLX text model using mlx_lm.stream_generate."""
         from mlx_lm import stream_generate
-        
+
         chat_id = f"chatcmpl-{uuid.uuid4().hex[:8]}"
         created = int(time.time())
-        
+
         # Prepare prompt with chat template
         messages = [{"role": "user", "content": user_message}]
-        if tokenizer.chat_template is not None:
-            prompt = tokenizer.apply_chat_template(
+        if state["tokenizer"].chat_template is not None:
+            prompt = state["tokenizer"].apply_chat_template(
                 messages, add_generation_prompt=True, return_dict=False,
             )
         else:
             prompt = user_message
-        
+
         # Stream tokens using mlx_lm's stream_generate
         for response in stream_generate(
-            model, tokenizer, prompt=prompt, max_tokens=max_tokens
+            state["model"], state["tokenizer"], prompt=prompt, max_tokens=max_tokens
         ):
             # response.text contains the next text segment (delta)
             if response.text:
@@ -425,7 +594,7 @@ def run_server_mode(model, tokenizer, processor, model_name, model_type, host="0
                     "id": chat_id,
                     "object": "chat.completion.chunk",
                     "created": created,
-                    "model": model_name,
+                    "model": state["model_name"],
                     "choices": [{
                         "index": 0,
                         "delta": {"content": response.text},
@@ -434,17 +603,17 @@ def run_server_mode(model, tokenizer, processor, model_name, model_type, host="0
                 }
                 yield f"data: {json.dumps(chunk)}\n\n"
                 await asyncio.sleep(0)  # Allow other tasks to run
-            
+
             # Check if generation is complete
             if response.finish_reason:
                 break
-        
+
         # Send final chunk with finish_reason
         final_chunk = {
             "id": chat_id,
             "object": "chat.completion.chunk",
             "created": created,
-            "model": model_name,
+            "model": state["model_name"],
             "choices": [{
                 "index": 0,
                 "delta": {},
@@ -453,29 +622,29 @@ def run_server_mode(model, tokenizer, processor, model_name, model_type, host="0
         }
         yield f"data: {json.dumps(final_chunk)}\n\n"
         yield "data: [DONE]\n\n"
-    
+
     async def stream_mlx_vision(user_message: str, max_tokens: int) -> AsyncGenerator[str, None]:
         """Stream tokens from MLX vision model (text-only mode)."""
         # Vision model streaming is more complex, fall back to non-streaming
         # and send as single chunk
         chat_id = f"chatcmpl-{uuid.uuid4().hex[:8]}"
         created = int(time.time())
-        
+
         formatted_prompt = apply_chat_template(
-            processor, model.config, user_message, num_images=0
+            state["processor"], state["model"].config, user_message, num_images=0
         )
         result = vlm_generate(
-            model, processor, formatted_prompt, image=None,
+            state["model"], state["processor"], formatted_prompt, image=None,
             max_tokens=max_tokens, verbose=False
         )
         response_text = result.text
-        
+
         # Send as single chunk (vision model doesn't easily support token streaming)
         chunk = {
             "id": chat_id,
             "object": "chat.completion.chunk",
             "created": created,
-            "model": model_name,
+            "model": state["model_name"],
             "choices": [{
                 "index": 0,
                 "delta": {"content": response_text},
@@ -561,12 +730,12 @@ def run_server_mode(model, tokenizer, processor, model_name, model_type, host="0
             # STREAMING MODE
             # ----------------------------------------------------------------
             if request.stream:
-                if IS_MACOS and MLX_LM_AVAILABLE and model_type == "text":
+                if IS_MACOS and MLX_LM_AVAILABLE and state["model_type"] == "text":
                     return StreamingResponse(
                         stream_mlx_text(user_message, max_tokens),
                         media_type="text/event-stream"
                     )
-                elif IS_MACOS and MLX_VLM_AVAILABLE and model_type == "vision":
+                elif IS_MACOS and MLX_VLM_AVAILABLE and state["model_type"] == "vision":
                     return StreamingResponse(
                         stream_mlx_vision(user_message, max_tokens),
                         media_type="text/event-stream"
@@ -574,64 +743,64 @@ def run_server_mode(model, tokenizer, processor, model_name, model_type, host="0
                 else:
                     # Transformers streaming not implemented yet, fall through to non-streaming
                     pass
-            
+
             # ----------------------------------------------------------------
             # NON-STREAMING MODE (original behavior)
             # ----------------------------------------------------------------
             # Generate response based on platform and model type
-            if IS_MACOS and MLX_LM_AVAILABLE and model_type == "text":
+            if IS_MACOS and MLX_LM_AVAILABLE and state["model_type"] == "text":
                 # MLX text model - include system message if present
                 messages = []
                 if system_message:
                     messages.append({"role": "system", "content": system_message})
                 messages.append({"role": "user", "content": user_message})
-                
-                if tokenizer.chat_template is not None:
-                    prompt = tokenizer.apply_chat_template(
+
+                if state["tokenizer"].chat_template is not None:
+                    prompt = state["tokenizer"].apply_chat_template(
                         messages, add_generation_prompt=True, return_dict=False,
                     )
                 else:
                     # Fallback: concatenate system + user
                     prompt = (system_message + "\n\n" if system_message else "") + user_message
-                
+
                 response_text = lm_generate(
-                    model, tokenizer, prompt=prompt, 
-                    max_tokens=max_tokens, 
+                    state["model"], state["tokenizer"], prompt=prompt,
+                    max_tokens=max_tokens,
                     verbose=False
                 )
-                
-            elif IS_MACOS and MLX_VLM_AVAILABLE and model_type == "vision":
+
+            elif IS_MACOS and MLX_VLM_AVAILABLE and state["model_type"] == "vision":
                 # MLX vision model (text-only mode)
                 formatted_prompt = apply_chat_template(
-                    processor, model.config, user_message, num_images=0
+                    state["processor"], state["model"].config, user_message, num_images=0
                 )
                 result = vlm_generate(
-                    model, processor, formatted_prompt, image=None,
+                    state["model"], state["processor"], formatted_prompt, image=None,
                     max_tokens=max_tokens, verbose=False
                 )
                 response_text = result.text
-                
+
             else:
                 # Transformers (Linux)
                 messages = [{"role": "user", "content": user_message}]
-                inputs = tokenizer.apply_chat_template(
+                inputs = state["tokenizer"].apply_chat_template(
                     messages,
                     add_generation_prompt=True,
                     return_tensors="pt",
                     tokenize=True,
                 )
-                input_ids = inputs["input_ids"].to(model.device)
-                attention_mask = inputs["attention_mask"].to(model.device)
-                
-                output = model.generate(
+                input_ids = inputs["input_ids"].to(state["model"].device)
+                attention_mask = inputs["attention_mask"].to(state["model"].device)
+
+                output = state["model"].generate(
                     input_ids=input_ids,
                     attention_mask=attention_mask,
                     do_sample=True,
                     temperature=request.temperature or 0.7,
                     max_new_tokens=max_tokens,
                 )
-                response_text = tokenizer.decode(output[0][input_ids.shape[-1]:], skip_special_tokens=True)
-            
+                response_text = state["tokenizer"].decode(output[0][input_ids.shape[-1]:], skip_special_tokens=True)
+
             # Parse tool calls from response if tools were requested
             tool_calls = []
             print(f"[DEBUG] Full response:\n{response_text[:500] if response_text else 'empty'}")
@@ -643,7 +812,7 @@ def run_server_mode(model, tokenizer, processor, model_name, model_type, host="0
                 if tool_calls:
                     # Clean tool call syntax from the text
                     response_text = clean_tool_calls_from_text(response_text)
-            
+
             # Build OpenAI-format response
             if tool_calls:
                 # Response with tool calls
@@ -651,7 +820,7 @@ def run_server_mode(model, tokenizer, processor, model_name, model_type, host="0
                     "id": f"chatcmpl-{uuid.uuid4().hex[:8]}",
                     "object": "chat.completion",
                     "created": int(time.time()),
-                    "model": model_name,
+                    "model": state["model_name"],
                     "choices": [{
                         "index": 0,
                         "message": {
@@ -672,7 +841,7 @@ def run_server_mode(model, tokenizer, processor, model_name, model_type, host="0
                 return ChatCompletionResponse(
                     id=f"chatcmpl-{uuid.uuid4().hex[:8]}",
                     created=int(time.time()),
-                    model=model_name,
+                    model=state["model_name"],
                     choices=[
                         ChatCompletionChoice(
                             index=0,
@@ -706,8 +875,8 @@ def run_server_mode(model, tokenizer, processor, model_name, model_type, host="0
     print("\n" + "=" * 60)
     print("🚀 OpenAI-Compatible Server Starting")
     print("=" * 60)
-    print(f"Model: {model_name}")
-    print(f"Type:  {model_type}")
+    print(f"Model: {state['model_name']}")
+    print(f"Type:  {state['model_type']}")
     print("=" * 60)
     print("Access URLs:")
     print(f"  Local:   http://localhost:{port}")
@@ -716,20 +885,18 @@ def run_server_mode(model, tokenizer, processor, model_name, model_type, host="0
     print("API Endpoints:")
     print(f"  POST http://{local_ip}:{port}/v1/chat/completions")
     print(f"  GET  http://{local_ip}:{port}/v1/models")
+    print(f"  GET  http://{local_ip}:{port}/v1/models/available")
+    print(f"  POST http://{local_ip}:{port}/v1/models/switch")
     print("=" * 60)
     print("\nExample usage with curl:")
     print(f'''  curl http://{local_ip}:{port}/v1/chat/completions \\
     -H "Content-Type: application/json" \\
-    -d '{{"model": "{model_name}", "messages": [{{"role": "user", "content": "Hello!"}}]}}'
+    -d '{{"model": "{state['model_name']}", "messages": [{{"role": "user", "content": "Hello!"}}]}}'
 ''')
-    print("Example usage with Python OpenAI client:")
-    print(f'''  from openai import OpenAI
-  client = OpenAI(base_url="http://{local_ip}:{port}/v1", api_key="not-needed")
-  response = client.chat.completions.create(
-      model="{model_name}",
-      messages=[{{"role": "user", "content": "Hello!"}}]
-  )
-  print(response.choices[0].message.content)
+    print("Switch model via API:")
+    print(f'''  curl -X POST http://{local_ip}:{port}/v1/models/switch \\
+    -H "Content-Type: application/json" \\
+    -d '{{"model": "latest"}}'
 ''')
     print("=" * 60)
     print("Press Ctrl+C to stop the server")
@@ -765,47 +932,58 @@ def clear_model_memory():
 # Main Program Loop (allows switching models)
 # ============================================================================
 switch_model = True  # Start by selecting a model
+cli_model_used = False  # Track if --model was used (first iteration only)
 
 while switch_model:
     switch_model = False  # Reset flag
-    
+
     # ============================================================================
     # Model Selection
     # ============================================================================
-    print("=" * 50)
-    print("Model Selection")
-    print("=" * 50)
+    # If --model was passed on CLI (first time only), skip the interactive menu
+    if cli_args.model and not cli_model_used:
+        cli_model_used = True
+        choice = resolve_model_choice(cli_args.model)
+    else:
+        print("=" * 50)
+        print("Model Selection")
+        print("=" * 50)
 
-    # Show all dynamically scanned models
-    for key, (path, model_type, desc) in MLX_MODELS.items():
-        vl_tag = " [VL]" if model_type == "vision" else ""
-        print(f"{key}. {desc}{vl_tag}")
+        # Show all dynamically scanned models
+        for key, (path, model_type, desc) in MLX_MODELS.items():
+            vl_tag = " [VL]" if model_type == "vision" else ""
+            print(f"{key}. {desc}{vl_tag}")
 
-    print("=" * 50)
+        print("=" * 50)
 
-    valid_choices = set(MLX_MODELS.keys())
-    while True:
-        choice = input(f"Select model ({'/'.join(sorted(valid_choices))}): ").strip()
-        if choice in valid_choices:
-            break
-        print(f"Please enter one of: {', '.join(sorted(valid_choices))}")
-    
+        valid_choices = set(MLX_MODELS.keys())
+        while True:
+            choice = input(f"Select model ({'/'.join(sorted(valid_choices))}): ").strip()
+            if choice in valid_choices:
+                break
+            print(f"Please enter one of: {', '.join(sorted(valid_choices))}")
+
     selected_path, selected_type, selected_desc = MLX_MODELS[choice]
     use_vl_model = (selected_type == "vision")
 
     # ============================================================================
     # Mode Selection: Interactive or Server
     # ============================================================================
-    print("\nMode Selection:")
-    print("1. Interactive chat (local terminal)")
-    print("2. Server mode (OpenAI-compatible API on network)")
-    mode_choice = input("Select mode (1 or 2): ").strip()
-    run_as_server = (mode_choice == "2")
-    
+    # If --server was passed on CLI, skip the interactive prompt
+    if cli_args.server:
+        run_as_server = True
+    else:
+        print("\nMode Selection:")
+        print("1. Interactive chat (local terminal)")
+        print("2. Server mode (OpenAI-compatible API on network)")
+        mode_choice = input("Select mode (1 or 2): ").strip()
+        run_as_server = (mode_choice == "2")
+
     # Server port selection (only if server mode)
-    server_port = 8000
-    if run_as_server:
-        port_input = input("Server port (default 8000): ").strip()
+    server_port = cli_args.port
+    if run_as_server and not cli_args.server:
+        # Only ask interactively if --server wasn't used
+        port_input = input(f"Server port (default {cli_args.port}): ").strip()
         if port_input.isdigit():
             server_port = int(port_input)
 

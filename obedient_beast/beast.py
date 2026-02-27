@@ -878,6 +878,12 @@ Just talk to me like a person. I can:
 `/openai` — switch to OpenAI brain (FULL)
 `/lfm` — switch to local brain (LITE)
 `/heartbeat on|off` — toggle background task processing
+
+**Switch local model (hot-swap, no restart needed):**
+`/model` — list all available local models
+`/model latest` — switch to the most recently downloaded model
+`/model GLM` — switch to a model by name (fuzzy match)
+`/model 3` — switch to a model by number
 `/clear` — clear chat history
 `/clear tasks` — clear task list
 `/clear memory` — clear saved memories (local)
@@ -965,6 +971,7 @@ Your AI brain determines how smart and capable I am:
   `/claude` — switch to Claude brain (FULL)
   `/openai` — switch to OpenAI brain (FULL)
   `/lfm` — switch to local brain (LITE)
+  `/model` — list local models / `/model Qwen3` to hot-swap
   `/heartbeat on|off` — toggle autopilot
   `/new` — start fresh conversation (CLI only)
   `/quit` — exit (CLI only)"""
@@ -1015,6 +1022,65 @@ Your AI brain determines how smart and capable I am:
         importlib.reload(capabilities)
         from capabilities import TIER_LABEL as new_tier, MAX_TOOL_TURNS as new_max
         return f"🔄 Switched to **{new_backend}** backend. Tier: {new_tier} (max {new_max} tool turns)"
+
+    # --- /model — list local models or switch the active model ---
+    if cmd == "/model" or cmd.startswith("/model "):
+        import urllib.request
+        import urllib.error
+        from llm import LFM_URL_LOCAL, LFM_URL_REMOTE, LFM_URL
+        # Try to reach the local model server
+        urls_to_try = [LFM_URL_LOCAL, LFM_URL_REMOTE]
+        if LFM_URL not in urls_to_try:
+            urls_to_try.insert(0, LFM_URL)
+        server_url = None
+        for url in urls_to_try:
+            try:
+                urllib.request.urlopen(url, timeout=3)
+                server_url = url
+                break
+            except Exception:
+                continue
+        if not server_url:
+            return "❌ Local model server not reachable. Start it with:\n  `python lfm_thinking.py --model latest --server`"
+
+        arg = cmd[len("/model"):].strip()
+
+        if arg:
+            # Switch to the specified model
+            try:
+                data = json.dumps({"model": arg}).encode()
+                req = urllib.request.Request(
+                    f"{server_url}/v1/models/switch",
+                    data=data,
+                    headers={"Content-Type": "application/json"},
+                    method="POST"
+                )
+                with urllib.request.urlopen(req, timeout=60) as resp:
+                    result = json.loads(resp.read().decode())
+                if result.get("status") == "already_loaded":
+                    return f"Already loaded: **{result['model']}**"
+                return f"🔄 Switched to: **{result.get('model', '?')}** ({result.get('type', '?')})"
+            except urllib.error.HTTPError as e:
+                body = e.read().decode() if e.fp else ""
+                return f"❌ Switch failed: {body}"
+            except Exception as e:
+                return f"❌ Switch failed: {e}"
+        else:
+            # List available models
+            try:
+                with urllib.request.urlopen(f"{server_url}/v1/models/available", timeout=10) as resp:
+                    result = json.loads(resp.read().decode())
+                current = result.get("current", "?")
+                models = result.get("models", [])
+                lines = [f"🧠 **Current model:** {current}", "", "**Available models** (`/model <name>` to switch):"]
+                for m in models:
+                    marker = " ← active" if m.get("active") else ""
+                    lines.append(f"  {m['key']}. {m['description']}{marker}")
+                lines.append("")
+                lines.append("Examples: `/model latest`, `/model GLM`, `/model 3`")
+                return "\n".join(lines)
+            except Exception as e:
+                return f"❌ Could not list models: {e}"
 
     # --- /tasks — list all tasks with status ---
     if cmd == "/tasks":
@@ -1302,7 +1368,7 @@ def cli():
     if MCP_ENABLED:
         print(f"   MCP: enabled")
     print("=" * 60)
-    print("Commands: /help, /more, /status, /skills, /new, /clear, /quit, /tools, /claude, /openai, /lfm")
+    print("Commands: /help, /more, /status, /skills, /new, /clear, /quit, /tools, /claude, /openai, /lfm, /model")
     print("=" * 60 + "\n")
 
     session_id = f"cli_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
