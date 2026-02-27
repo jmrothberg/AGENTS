@@ -16,6 +16,23 @@ USAGE:
   python lfm_thinking.py --model Qwen3 --server    # Serve model matching "Qwen3"
   python lfm_thinking.py --model latest --server --port 9000
   python lfm_thinking.py --list                    # List available models and exit
+
+PM2 (process manager) — copy/paste to start as a managed background service:
+
+  pm2 start /Users/jonathanrothberg/Agents/lfm_thinking.py \
+    --name lfm-thinking --interpreter python3 \
+    --max-restarts 3 --restart-delay 10000 \
+    -- --model Qwen3.5-122B --server
+
+  NOTE: --max-restarts 3 prevents infinite crash loops (large models can
+  take a long time to load). --restart-delay 10000 gives 10s between retries.
+
+  pm2 status              # check running processes
+  pm2 logs lfm-thinking   # view stdout/stderr
+  pm2 restart lfm-thinking
+  pm2 stop lfm-thinking
+  pm2 delete lfm-thinking # remove from pm2 entirely before re-adding
+  pm2 save                # persist across reboots (pair with: pm2 startup)
 """
 
 import platform
