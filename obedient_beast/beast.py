@@ -689,9 +689,15 @@ def execute_tool(name: str, args: dict) -> str:
                 return "Error: URL must start with http:// or https://"
 
             try:
+                import ssl
+                try:
+                    import certifi
+                    ssl_ctx = ssl.create_default_context(cafile=certifi.where())
+                except ImportError:
+                    ssl_ctx = ssl.create_default_context()
                 req = urllib.request.Request(url, method=method)
                 req.add_header("User-Agent", "ObedientBeast/1.0")
-                with urllib.request.urlopen(req, timeout=30) as resp:
+                with urllib.request.urlopen(req, timeout=30, context=ssl_ctx) as resp:
                     body = resp.read().decode("utf-8", errors="replace")
                     status = resp.status
                     # Truncate to 4000 chars to keep LLM context manageable

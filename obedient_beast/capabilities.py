@@ -4,35 +4,36 @@ Capability Tiers - Backend-aware settings for Beast
 ====================================================
 Reads LLM_BACKEND from environment and exposes tiered settings.
 
-Two-Tier System:
-~~~~~~~~~~~~~~~~~
-    FULL mode (Claude/OpenAI) — powerful cloud models, multi-tool capable
-    LITE mode ("lfm" / local)  — restricted, single-tool friendly
+Three-Tier System:
+~~~~~~~~~~~~~~~~~~~
+    FULL mode  (Claude/OpenAI) — powerful cloud models, multi-tool capable
+    LOCAL mode ("lfm" / local) — strong local models (Qwen3.5-122B, etc.)
+    LITE mode  (small local)   — restricted, single-tool friendly (legacy)
 
-    +---------------------+-----------+-----------+
-    | Setting             | FULL      | LITE      |
-    +---------------------+-----------+-----------+
-    | Max tool turns      | 10        | 2         |
-    | Single-tool mode    | Off       | On        |
-    | Sequential thinking | On        | Off       |
-    | Heartbeat interval  | 5 min     | 10 min    |
-    | Tasks per cycle     | 3         | 1         |
-    | Memory detail       | Full      | Minimal   |
-    | MCP tiers loaded    | All 3     | All 3     |
-    +---------------------+-----------+-----------+
+    +---------------------+-----------+-----------+-----------+
+    | Setting             | FULL      | LOCAL     | LITE      |
+    +---------------------+-----------+-----------+-----------+
+    | Max tool turns      | 10        | 5         | 2         |
+    | Single-tool mode    | Off       | Off       | On        |
+    | Sequential thinking | On        | Off       | Off       |
+    | Heartbeat interval  | 5 min     | 10 min    | 10 min    |
+    | Tasks per cycle     | 3         | 2         | 1         |
+    | Memory detail       | Full      | Full      | Minimal   |
+    | MCP tiers loaded    | All 3     | All 3     | All 3     |
+    +---------------------+-----------+-----------+-----------+
 
 "lfm" is a legacy name — it means any model served by the local server,
 not just LFM-2.5 models.
 
-Why "2 tool turns" for LITE?
-    Local LLMs (Qwen, GLM, Llama) tend to loop on tool calls instead of
-    summarizing the result. Limiting to 2 turns + SINGLE_TOOL_MODE forces
-    the model to: (1) call one tool, (2) see the result, (3) respond with text.
+LOCAL vs LITE — what changed?
+    Newer local models (Qwen3.5-122B, etc.) are strong enough for multi-tool
+    chains. They no longer loop infinitely on tool calls, so SINGLE_TOOL_MODE
+    is off and they get 5 tool turns. LOCAL is now the default for "lfm" backend.
+    Set LLM_LOCAL_TIER=lite to force the old restricted behavior.
 
-Why do all MCP tiers load in LITE mode too?
+Why do all MCP tiers load in every mode?
     The user's local LLM needs access to all MCP servers (including cloud ones
-    like brave-search for web queries). The LITE restrictions (single-tool mode,
-    2 max turns) prevent tool-call loops. MCP tier labels are organizational
+    like brave-search for web queries). MCP tier labels are organizational
     only — they don't restrict loading.
 
 Inspired by Clawdbot/OpenClaw's tiered agent architecture.
@@ -49,51 +50,54 @@ load_dotenv()
 _BACKEND = os.getenv("LLM_BACKEND_TEST") or os.getenv("LLM_BACKEND", "lfm")
 
 
-def _is_local() -> bool:
-    """Check if we're running a local backend (anything that isn't claude/openai)."""
-    return _BACKEND not in ("claude", "openai")
+def _is_cloud() -> bool:
+    """Check if we're running a cloud backend (claude/openai)."""
+    return _BACKEND in ("claude", "openai")
+
+
+def _local_tier() -> str:
+    """Determine local model tier: 'local' (default) or 'lite' (legacy restricted).
+
+    Set LLM_LOCAL_TIER=lite to force old single-tool behavior for weaker models.
+    """
+    return os.getenv("LLM_LOCAL_TIER", "local").lower()
 
 
 # ---------------------------------------------------------------------------
 # Tiered Settings
 # ---------------------------------------------------------------------------
 
-# Max tool-call turns before forcing a text response.
-# FULL: 10 turns is enough for complex multi-step tasks (e.g., read file → edit → verify).
-# LITE: 2 turns prevents infinite tool-call loops that local LLMs are prone to.
-MAX_TOOL_TURNS = 2 if _is_local() else 10
+if _is_cloud():
+    # FULL mode — Claude/OpenAI cloud models
+    MAX_TOOL_TURNS = 10
+    SINGLE_TOOL_MODE = False
+    SEQUENTIAL_THINKING_ENABLED = True
+    HEARTBEAT_INTERVAL_SEC = 300        # 5 min
+    HEARTBEAT_TASKS_PER_CYCLE = 3
+    MEMORY_DETAIL = "full"
+    TIER_LABEL = f"FULL ({_BACKEND})"
+elif _local_tier() == "lite":
+    # LITE mode — weak/small local models (legacy, opt-in via LLM_LOCAL_TIER=lite)
+    MAX_TOOL_TURNS = 2
+    SINGLE_TOOL_MODE = True             # Stop sending tools after first use
+    SEQUENTIAL_THINKING_ENABLED = False
+    HEARTBEAT_INTERVAL_SEC = 600        # 10 min
+    HEARTBEAT_TASKS_PER_CYCLE = 1
+    MEMORY_DETAIL = "minimal"
+    TIER_LABEL = "LITE (local)"
+else:
+    # LOCAL mode — strong local models (Qwen3.5-122B, etc.) — new default
+    MAX_TOOL_TURNS = 5
+    SINGLE_TOOL_MODE = False            # Strong models handle multi-tool chains
+    SEQUENTIAL_THINKING_ENABLED = False
+    HEARTBEAT_INTERVAL_SEC = 600        # 10 min (still slower than cloud)
+    HEARTBEAT_TASKS_PER_CYCLE = 2
+    MEMORY_DETAIL = "full"
+    TIER_LABEL = "LOCAL (local)"
 
-# After first tool call in one run(), stop sending tools to the LLM.
-# This forces the model to summarize the tool result as text.
-# Only needed for local LLMs — cloud models handle multi-tool properly.
-SINGLE_TOOL_MODE = _is_local()
-
-# Sequential Thinking MCP: only useful if the LLM is strong enough to
-# follow multi-step reasoning AND we can afford extra tool-call turns.
-SEQUENTIAL_THINKING_ENABLED = not _is_local()
-
-# Heartbeat interval (seconds) — how often the autonomous loop checks tasks.
-# Longer interval for local models because they're slower and use local compute.
-HEARTBEAT_INTERVAL_SEC = 600 if _is_local() else 300  # 10 min local, 5 min cloud
-
-# How many tasks the heartbeat processes per wake-up.
-# Limited for local models to avoid long blocking periods.
-HEARTBEAT_TASKS_PER_CYCLE = 1 if _is_local() else 3
-
-# Memory detail level: "full" saves rich context, "minimal" saves key facts only.
-# Local models produce less reliable summaries, so we save less to avoid noise.
-MEMORY_DETAIL = "minimal" if _is_local() else "full"
-
-# MCP tier filtering — which tiers of MCP servers are loaded at startup.
-# All tiers are always loaded regardless of backend. The tier labels in
-# mcp_servers.json are for documentation/organization only.
-# The LITE/FULL distinction controls tool-calling behavior (single-tool mode,
-# max turns), NOT which MCP servers are available. A local LLM should still
-# be able to use brave-search, github, etc.
+# MCP tier filtering — all tiers always loaded regardless of backend.
+# The tier labels in mcp_servers.json are for documentation/organization only.
 MCP_ALLOWED_TIERS = ["essential", "extended", "cloud"]
-
-# Label for logging ("LFM" in the label is legacy — means any local model)
-TIER_LABEL = "LITE (local LFM)" if _is_local() else f"FULL ({_BACKEND})"
 
 
 # ---------------------------------------------------------------------------
@@ -102,6 +106,8 @@ TIER_LABEL = "LITE (local LFM)" if _is_local() else f"FULL ({_BACKEND})"
 if __name__ == "__main__":
     print(f"Backend:              {_BACKEND}")
     print(f"Tier:                 {TIER_LABEL}")
+    if not _is_cloud():
+        print(f"Local tier override:  LLM_LOCAL_TIER={os.getenv('LLM_LOCAL_TIER', '(not set, default=local)')}")
     print(f"Max tool turns:       {MAX_TOOL_TURNS}")
     print(f"Single-tool mode:     {SINGLE_TOOL_MODE}")
     print(f"Sequential thinking:  {SEQUENTIAL_THINKING_ENABLED}")
