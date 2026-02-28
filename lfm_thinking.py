@@ -176,21 +176,40 @@ def scan_mlx_models(models_dir):
         # Detect model type
         model_type = "text"  # default
         
-        # Check config.json for model_type field
+        # Check config.json for vision signals
         if os.path.exists(config_path):
             try:
                 with open(config_path, 'r') as f:
                     config = json.load(f)
                     mt = config.get("model_type", "").lower()
-                    # Vision models typically have "vl", "vision", "image" in model_type
+                    # Vision models: "vl", "vision", "image" in model_type
                     if any(x in mt for x in ["vl", "vision", "image"]):
+                        model_type = "vision"
+                    # Newer multimodal models (Qwen3.5, etc.) have vision token IDs
+                    # or vision_config even without "vl" in model_type
+                    if any(k in config for k in ["image_token_id", "vision_start_token_id", "vision_config"]):
                         model_type = "vision"
             except:
                 pass
-        
+
         # Also check for processor_config.json (vision models have this)
         if os.path.exists(processor_path):
             model_type = "vision"
+
+        # Final check: if config says vision but weights don't have vision_tower,
+        # the model was converted text-only (e.g., Qwen3.5 quantized without vision).
+        # Check the safetensors index for actual vision weights.
+        if model_type == "vision":
+            index_path = os.path.join(model_path, "model.safetensors.index.json")
+            if os.path.exists(index_path):
+                try:
+                    with open(index_path, 'r') as f:
+                        weight_map = json.load(f).get("weight_map", {})
+                    has_vision_weights = any("vision" in k.lower() for k in weight_map)
+                    if not has_vision_weights:
+                        model_type = "text"  # Config says vision, but weights are text-only
+                except:
+                    pass
         
         # Create description from folder name
         type_label = "(Vision-Language)" if model_type == "vision" else "(Text)"
@@ -640,21 +659,29 @@ def run_server_mode(model, tokenizer, processor, model_name, model_type, host="0
         yield f"data: {json.dumps(final_chunk)}\n\n"
         yield "data: [DONE]\n\n"
 
-    async def stream_mlx_vision(user_message: str, max_tokens: int) -> AsyncGenerator[str, None]:
-        """Stream tokens from MLX vision model (text-only mode)."""
+    async def stream_mlx_vision(user_message: str, max_tokens: int, image_path: str = None) -> AsyncGenerator[str, None]:
+        """Stream tokens from MLX vision model (with optional image)."""
         # Vision model streaming is more complex, fall back to non-streaming
         # and send as single chunk
         chat_id = f"chatcmpl-{uuid.uuid4().hex[:8]}"
         created = int(time.time())
 
+        num_images = 1 if image_path else 0
         formatted_prompt = apply_chat_template(
-            state["processor"], state["model"].config, user_message, num_images=0
+            state["processor"], state["model"].config, user_message, num_images=num_images
         )
         result = vlm_generate(
-            state["model"], state["processor"], formatted_prompt, image=None,
+            state["model"], state["processor"], formatted_prompt,
+            image=image_path,
             max_tokens=max_tokens, verbose=False
         )
         response_text = result.text
+        # Clean up temp image file
+        if image_path:
+            try:
+                os.unlink(image_path)
+            except OSError:
+                pass
 
         # Send as single chunk (vision model doesn't easily support token streaming)
         chunk = {
@@ -693,19 +720,40 @@ def run_server_mode(model, tokenizer, processor, model_name, model_type, host="0
             # ---------------------------------------------------------------
             system_message = ""
             conversation_parts = []
-            
+            image_path = None  # Extracted from image_url content blocks
+
             for msg in request.messages:
                 content = msg.content
                 # Handle content as string or list
                 if isinstance(content, list):
                     text_content = " ".join(
                         item.get("text", "") if isinstance(item, dict) else str(item)
-                        for item in content 
+                        for item in content
                         if isinstance(item, dict) and item.get("type") in ["text", "tool_result"]
                     )
+                    # Extract image from image_url blocks (base64 data URI from Beast)
+                    # Only extract the first image found across all messages
+                    if image_path is None:
+                        for item in content:
+                            if isinstance(item, dict) and item.get("type") == "image_url":
+                                data_url = item.get("image_url", {}).get("url", "")
+                                if data_url.startswith("data:"):
+                                    try:
+                                        import base64, tempfile
+                                        # Parse "data:image/jpeg;base64,/9j/..."
+                                        header, b64data = data_url.split(",", 1)
+                                        img_bytes = base64.b64decode(b64data)
+                                        tmp = tempfile.NamedTemporaryFile(suffix=".jpg", delete=False)
+                                        tmp.write(img_bytes)
+                                        tmp.close()
+                                        image_path = tmp.name
+                                        print(f"[DEBUG] Extracted image to {image_path} ({len(img_bytes)} bytes)")
+                                    except Exception as img_err:
+                                        print(f"[DEBUG] Image extraction failed: {img_err}")
+                                    break  # One image is enough
                 else:
                     text_content = content or ""
-                
+
                 if msg.role == "system":
                     system_message = text_content
                 elif msg.role == "user":
@@ -742,7 +790,7 @@ def run_server_mode(model, tokenizer, processor, model_name, model_type, host="0
                 user_message = user_message + tool_instruction
             
             max_tokens = request.max_tokens or 512
-            
+
             # ----------------------------------------------------------------
             # STREAMING MODE
             # ----------------------------------------------------------------
@@ -754,7 +802,7 @@ def run_server_mode(model, tokenizer, processor, model_name, model_type, host="0
                     )
                 elif IS_MACOS and MLX_VLM_AVAILABLE and state["model_type"] == "vision":
                     return StreamingResponse(
-                        stream_mlx_vision(user_message, max_tokens),
+                        stream_mlx_vision(user_message, max_tokens, image_path=image_path),
                         media_type="text/event-stream"
                     )
                 else:
@@ -787,15 +835,23 @@ def run_server_mode(model, tokenizer, processor, model_name, model_type, host="0
                 )
 
             elif IS_MACOS and MLX_VLM_AVAILABLE and state["model_type"] == "vision":
-                # MLX vision model (text-only mode)
+                # MLX vision model — with or without image
+                num_images = 1 if image_path else 0
                 formatted_prompt = apply_chat_template(
-                    state["processor"], state["model"].config, user_message, num_images=0
+                    state["processor"], state["model"].config, user_message, num_images=num_images
                 )
                 result = vlm_generate(
-                    state["model"], state["processor"], formatted_prompt, image=None,
+                    state["model"], state["processor"], formatted_prompt,
+                    image=image_path,
                     max_tokens=max_tokens, verbose=False
                 )
                 response_text = result.text
+                # Clean up temp image file
+                if image_path:
+                    try:
+                        os.unlink(image_path)
+                    except OSError:
+                        pass
 
             else:
                 # Transformers (Linux)
@@ -873,6 +929,8 @@ def run_server_mode(model, tokenizer, processor, model_name, model_type, host="0
                     )
                 )
             
+        except HTTPException:
+            raise  # Let HTTP errors (like 400 for image rejection) pass through
         except Exception as e:
             raise HTTPException(status_code=500, detail=str(e))
     

@@ -53,6 +53,7 @@ Slash commands (work from CLI and WhatsApp):
 import os
 import sys
 import json
+import base64
 import subprocess
 from pathlib import Path
 from datetime import datetime
@@ -397,12 +398,14 @@ TOOLS = [
     #   falls back to local JSON memory (workspace/memory.json) when not.
     {
         "name": "add_task",
-        "description": "Add, update, or complete a task in the autonomous task queue. Beast and users can queue work for later.",
+        "description": "Add, update, or complete a task in the autonomous task queue. Beast and users can queue work for later. Supports scheduling: use scheduled_at for one-shot timed tasks, repeat_seconds for recurring tasks.",
         "params": {
             "description": "What the task is (required for new tasks)",
             "priority": "low, medium, or high (default: medium)",
             "status": "pending, done, or failed (default: pending). Use 'done'/'failed' to close a task.",
-            "task_id": "Optional: ID of existing task to update its status"
+            "task_id": "Optional: ID of existing task to update its status",
+            "scheduled_at": "Optional: ISO timestamp for when to run (e.g., '2026-02-28T15:00:00'). Task won't be processed until this time.",
+            "repeat_seconds": "Optional: interval in seconds for recurring tasks (e.g., 3600 for hourly, 86400 for daily). Task auto-resets after each run."
         }
     },
     {
@@ -647,9 +650,24 @@ def execute_tool(name: str, args: dict) -> str:
                     "status": args.get("status", "pending"),
                     "created_at": datetime.now().isoformat()
                 }
+                # Scheduling: one-shot or recurring
+                scheduled_at = args.get("scheduled_at")
+                repeat_seconds = args.get("repeat_seconds")
+                timing_info = ""
+                if scheduled_at:
+                    new_task["scheduled_at"] = scheduled_at
+                    timing_info = f" (scheduled for {scheduled_at})"
+                if repeat_seconds:
+                    try:
+                        interval = int(repeat_seconds)
+                        new_task["repeat_seconds"] = interval
+                        new_task["next_run_at"] = datetime.now().isoformat()
+                        timing_info = f" (recurring every {interval}s)"
+                    except ValueError:
+                        pass
                 data["tasks"].append(new_task)
                 tasks_file.write_text(json.dumps(data, indent=2))
-                return f"Task #{new_task['id']} added: {new_task['description']} [{new_task['priority']}]"
+                return f"Task #{new_task['id']} added: {new_task['description']} [{new_task['priority']}]{timing_info}"
 
         elif name == "recall_memory":
             # Memory recall: tries MCP memory server first (rich knowledge graph),
@@ -760,10 +778,114 @@ def save_message(session_id: str, message: dict):
 
 
 # ---------------------------------------------------------------------------
+# Fallback helpers
+# ---------------------------------------------------------------------------
+
+# LLM_FALLBACK: comma-separated backend names to try if primary fails.
+# Example: LLM_FALLBACK=claude,openai — if primary (lfm) fails, try Claude then OpenAI.
+LLM_FALLBACK = [b.strip() for b in os.getenv("LLM_FALLBACK", "").split(",") if b.strip()]
+
+
+def _text_only_history(history: list) -> list:
+    """
+    Strip tool-call and tool-result messages from history, keeping only
+    plain user/assistant text messages. This avoids format incompatibility
+    when falling back between backends (Claude tool format != OpenAI format).
+    """
+    clean = []
+    for msg in history:
+        role = msg.get("role")
+        content = msg.get("content")
+        # Skip tool-result messages
+        if role == "tool":
+            continue
+        # Skip assistant messages with tool_calls (OpenAI format)
+        if role == "assistant" and msg.get("tool_calls"):
+            continue
+        # Skip messages with structured content blocks (Claude format)
+        if isinstance(content, list):
+            # Extract text from Claude content blocks
+            texts = [b.get("text", "") for b in content if isinstance(b, dict) and b.get("type") == "text"]
+            if texts:
+                clean.append({"role": role, "content": " ".join(texts)})
+            continue
+        # Keep plain text messages
+        if role in ("user", "assistant") and isinstance(content, str) and content.strip():
+            clean.append({"role": role, "content": content})
+    return clean
+
+
+def _strip_images_from_history(history: list) -> list:
+    """
+    Replace multimodal content arrays with text-only equivalents.
+    Used when an image was sent but the model doesn't support vision —
+    we keep the text part and add a note about the dropped image.
+    """
+    clean = []
+    for msg in history:
+        content = msg.get("content")
+        if isinstance(content, list):
+            # Extract just the text blocks, drop image blocks
+            texts = []
+            had_image = False
+            for block in content:
+                if not isinstance(block, dict):
+                    continue
+                if block.get("type") == "text":
+                    texts.append(block["text"])
+                elif block.get("type") in ("image", "image_url"):
+                    had_image = True
+            text = " ".join(texts)
+            if had_image:
+                text = "[An image was sent but this model cannot process images.]\n" + text
+            clean.append({**msg, "content": text})
+        else:
+            clean.append(msg)
+    return clean
+
+
+def _summarize_dropped_context(dropped_messages: list) -> str:
+    """
+    Build a mechanical summary of dropped messages (no LLM call needed).
+    Extracts user topics and tool names used to preserve key context.
+    """
+    user_topics = []
+    tools_used = set()
+    for msg in dropped_messages:
+        role = msg.get("role", "")
+        content = msg.get("content", "")
+        if role == "user" and isinstance(content, str):
+            # First line of each user message as a topic
+            first_line = content.split("\n")[0].strip()[:100]
+            if first_line and not first_line.startswith("[EARLIER CONTEXT SUMMARY]"):
+                user_topics.append(first_line)
+        elif role == "assistant":
+            # Extract tool names from Claude format
+            if isinstance(content, list):
+                for block in content:
+                    if isinstance(block, dict) and block.get("type") == "tool_use":
+                        tools_used.add(block.get("name", ""))
+            # Extract tool names from OpenAI format
+            if isinstance(msg.get("tool_calls"), list):
+                for tc in msg["tool_calls"]:
+                    name = tc.get("function", {}).get("name", "") if isinstance(tc, dict) else ""
+                    if name:
+                        tools_used.add(name)
+    lines = []
+    if user_topics:
+        # Keep last 10 topics
+        recent = user_topics[-10:]
+        lines.append("Topics discussed: " + "; ".join(recent))
+    if tools_used:
+        lines.append("Tools used: " + ", ".join(sorted(tools_used)))
+    return "\n".join(lines) if lines else "Earlier conversation (details trimmed)"
+
+
+# ---------------------------------------------------------------------------
 # Agent Loop
 # ---------------------------------------------------------------------------
 
-def run(user_input: str, session_id: str = "default", llm=None) -> str:
+def run(user_input: str, session_id: str = "default", llm=None, image_path: str = None) -> str:
     """
     Run the agent loop: call LLM, execute tools, repeat until done.
     Returns the final text response.
@@ -1217,6 +1339,35 @@ I'm an AI assistant that lives on your computer. You talk to me (here in the ter
     # Load history and add user message
     history = load_session(session_id)
 
+    # --- Build user message (text-only or multimodal with image) ---
+    def _build_user_message(text_content: str) -> dict:
+        """Build a user message, adding image content if image_path is set."""
+        if not image_path or not Path(image_path).exists():
+            return {"role": "user", "content": text_content}
+
+        # Base64-encode the image
+        img_data = base64.b64encode(Path(image_path).read_bytes()).decode("utf-8")
+        media_type = "image/jpeg"  # WhatsApp images are always JPEG
+
+        if llm.backend == "claude":
+            # Claude format: content array with image + text blocks
+            return {
+                "role": "user",
+                "content": [
+                    {"type": "image", "source": {"type": "base64", "media_type": media_type, "data": img_data}},
+                    {"type": "text", "text": text_content}
+                ]
+            }
+        else:
+            # OpenAI / lfm format: content array with image_url + text
+            return {
+                "role": "user",
+                "content": [
+                    {"type": "image_url", "image_url": {"url": f"data:{media_type};base64,{img_data}"}},
+                    {"type": "text", "text": text_content}
+                ]
+            }
+
     # Auto-recall memories at session start (new sessions only).
     # If this is a fresh session with no prior messages, inject recent
     # memories as context so Beast remembers user preferences.
@@ -1224,18 +1375,17 @@ I'm an AI assistant that lives on your computer. You talk to me (here in the ter
         memory_context = _get_startup_memory_context()
         if memory_context:
             # Add memory context as a system-like user message the LLM can see
-            memory_msg = {
-                "role": "user",
-                "content": f"[AUTO-RECALLED MEMORIES]\n{memory_context}\n[END MEMORIES]\n\nUser's actual message: {user_input}"
-            }
+            memory_msg = _build_user_message(
+                f"[AUTO-RECALLED MEMORIES]\n{memory_context}\n[END MEMORIES]\n\nUser's actual message: {user_input}"
+            )
             history.append(memory_msg)
             save_message(session_id, memory_msg)
         else:
-            user_msg = {"role": "user", "content": user_input}
+            user_msg = _build_user_message(user_input)
             history.append(user_msg)
             save_message(session_id, user_msg)
     else:
-        user_msg = {"role": "user", "content": user_input}
+        user_msg = _build_user_message(user_input)
         history.append(user_msg)
         save_message(session_id, user_msg)
 
@@ -1252,29 +1402,98 @@ I'm an AI assistant that lives on your computer. You talk to me (here in the ter
     # Long sessions with many tool calls grow unbounded. This trims old messages
     # to keep the most recent ones within a safe token budget. The full history
     # is preserved in the session JSONL file — only the working context is capped.
+    # When trimming, a mechanical summary of dropped messages is inserted as the
+    # first message to preserve key context (topics discussed, tools used).
     MAX_HISTORY_CHARS = 80000  # ~20k tokens, safe for most models
-    history_size = sum(len(json.dumps(m)) for m in history)
+    SUMMARY_BUDGET = 1000     # Reserve space for the summary message
+
+    def _msg_text_size(msg: dict) -> int:
+        """Estimate message size excluding base64 image data (which inflates size
+        but doesn't accumulate across turns — only the current message has it)."""
+        content = msg.get("content")
+        if isinstance(content, list):
+            size = 0
+            for block in content:
+                if isinstance(block, dict):
+                    if block.get("type") in ("image", "image_url"):
+                        size += 200  # Count image block as ~200 chars (metadata only)
+                    else:
+                        size += len(json.dumps(block))
+                else:
+                    size += len(str(block))
+            return size
+        return len(json.dumps(msg))
+
+    history_size = sum(_msg_text_size(m) for m in history)
     if history_size > MAX_HISTORY_CHARS:
         trimmed = []
-        budget = MAX_HISTORY_CHARS
+        budget = MAX_HISTORY_CHARS - SUMMARY_BUDGET
         for msg in reversed(history):
-            msg_size = len(json.dumps(msg))
+            msg_size = _msg_text_size(msg)
             if budget - msg_size < 0 and trimmed:
                 break
             trimmed.append(msg)
             budget -= msg_size
-        history = list(reversed(trimmed))
-        print(f"[Beast] Context trimmed to {len(history)} messages", file=sys.stderr)
+        kept = list(reversed(trimmed))
+        # Build summary of dropped messages
+        dropped_count = len(history) - len(kept)
+        dropped = history[:dropped_count]
+        summary_text = _summarize_dropped_context(dropped)
+        summary_msg = {
+            "role": "user",
+            "content": f"[EARLIER CONTEXT SUMMARY]\n{summary_text}\n({dropped_count} messages trimmed)\n[END SUMMARY]"
+        }
+        # Replace existing summary if first message is one, otherwise prepend
+        if kept and isinstance(kept[0].get("content"), str) and kept[0]["content"].startswith("[EARLIER CONTEXT SUMMARY]"):
+            kept[0] = summary_msg
+        else:
+            kept.insert(0, summary_msg)
+        history = kept
+        print(f"[Beast] Context trimmed to {len(history)} messages ({dropped_count} summarized)", file=sys.stderr)
+
+    # When an image is attached, skip tools on the first turn so the VLM
+    # focuses on describing the image instead of getting confused by 40+ tools.
+    # Tools are available on all subsequent turns if the model needs them.
+    _image_first_turn = image_path is not None
 
     for turn in range(DEPTH):
-        # Call LLM — sends conversation history + system prompt + tools.
-        # Wrapped in try/except so connection errors, timeouts, and rate limits
-        # return a message to the user instead of crashing the agent loop.
-        try:
-            response = llm.chat(history, tools=all_tools, system=SYSTEM_PROMPT)
-        except Exception as e:
-            print(f"[Beast] LLM error: {e}", file=sys.stderr)
-            return f"LLM error: {e}"
+        # Determine tools for this turn
+        turn_tools = None if _image_first_turn else all_tools
+        _image_first_turn = False  # Only skip tools on the very first turn
+
+        # Call LLM with fallback chain — try primary backend, then fallbacks.
+        # On fallback, use text-only history to avoid format incompatibilities.
+        # If all backends fail and an image is present, retry without the image
+        # (the model may not support vision).
+        response = None
+        errors = []
+        backends_to_try = [None] + LLM_FALLBACK  # None = current/primary
+        for fallback_backend in backends_to_try:
+            try:
+                if fallback_backend is None:
+                    response = llm.chat(history, tools=turn_tools, system=SYSTEM_PROMPT)
+                else:
+                    fallback_llm = get_llm(fallback_backend)
+                    print(f"[Beast] Falling back to {fallback_backend}...", file=sys.stderr)
+                    text_history = _text_only_history(history)
+                    response = fallback_llm.chat(text_history, tools=turn_tools, system=SYSTEM_PROMPT)
+                    llm = fallback_llm  # Switch for remaining turns
+                break  # Success
+            except Exception as e:
+                label = fallback_backend or llm.backend
+                print(f"[Beast] LLM error ({label}): {e}", file=sys.stderr)
+                errors.append(f"{label}: {e}")
+        # If all backends failed and history contains images, retry without images.
+        # This handles non-VLM models that choke on multimodal content.
+        if response is None and image_path:
+            print("[Beast] Retrying without image (model may not support vision)...", file=sys.stderr)
+            history = _strip_images_from_history(history)
+            try:
+                response = llm.chat(history, tools=all_tools, system=SYSTEM_PROMPT)
+            except Exception as e:
+                errors.append(f"{llm.backend} (no-image retry): {e}")
+        if response is None:
+            return f"All LLM backends failed: {'; '.join(errors)}"
 
         if response.tool_calls:
             # --- Build ONE assistant message with ALL tool calls ---
@@ -1396,11 +1615,12 @@ def cli():
     if MCP_ENABLED:
         print(f"   MCP: enabled")
     print("=" * 60)
-    print("Commands: /help, /more, /status, /depth, /new, /clear, /quit, /tools, /claude, /openai, /lfm, /model")
+    print("Commands: /help, /more, /status, /depth, /new, /clear, /quit, /tools, /image, /claude, /openai, /lfm, /model")
     print("=" * 60 + "\n")
 
     session_id = f"cli_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
     llm = get_llm()
+    pending_image = None  # Set by /image command, used on next message
 
     while True:
         try:
@@ -1415,6 +1635,7 @@ def cli():
 
             if user_input.lower() in ["/new", "/reset"]:
                 session_id = f"cli_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+                pending_image = None
                 print("(Session reset)\n")
                 continue
 
@@ -1427,8 +1648,27 @@ def cli():
                 print()
                 continue
 
+            # /image <path> — attach an image to the next message
+            if user_input.lower().startswith("/image"):
+                parts = user_input.split(maxsplit=1)
+                if len(parts) < 2:
+                    print("Usage: /image <path>  — then type your question on the next prompt")
+                    print("Example: /image ~/photo.jpg")
+                    print()
+                    continue
+                img_path = Path(parts[1].strip()).expanduser()
+                if not img_path.exists():
+                    print(f"File not found: {img_path}")
+                    print()
+                    continue
+                pending_image = str(img_path)
+                print(f"(Image attached: {img_path.name} — type your question now)")
+                continue
+
+            # Send message, with image if one is pending
             print("Beast: ", end="", flush=True)
-            response = run(user_input, session_id, llm)
+            response = run(user_input, session_id, llm, image_path=pending_image)
+            pending_image = None  # Clear after use
             print(response)
             print()
 

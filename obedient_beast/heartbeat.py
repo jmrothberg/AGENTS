@@ -64,6 +64,11 @@ from llm import get_llm
 WORKSPACE = Path(__file__).parent / "workspace"
 TASKS_FILE = WORKSPACE / "tasks.json"
 HEARTBEAT_CONTROL_FILE = WORKSPACE / "heartbeat_control.json"
+OUTBOX_DIR = WORKSPACE / "outbox"
+
+# NOTIFICATION_CHAT_ID: WhatsApp number or group ID to send task completion alerts to.
+# If not set, notifications are skipped (console-only output).
+NOTIFICATION_CHAT_ID = os.getenv("NOTIFICATION_CHAT_ID", "")
 
 # Graceful shutdown flag — set by signal handler, checked in sleep loop
 _shutdown = False
@@ -96,11 +101,67 @@ def save_tasks(data: dict):
 
 
 def get_pending_tasks(data: dict) -> list:
-    """Get pending tasks sorted by priority (high > medium > low)."""
+    """
+    Get pending tasks that are ready to run, sorted by priority.
+    Scheduling rules:
+    - Tasks with scheduled_at: only ready if scheduled_at <= now
+    - Tasks with next_run_at (recurring): only ready if next_run_at <= now
+    - Tasks with neither: always ready (immediate)
+    """
     priority_order = {"high": 0, "medium": 1, "low": 2}
-    pending = [t for t in data.get("tasks", []) if t.get("status") == "pending"]
-    pending.sort(key=lambda t: priority_order.get(t.get("priority", "medium"), 1))
-    return pending
+    now = datetime.now().isoformat()
+    ready = []
+    for t in data.get("tasks", []):
+        if t.get("status") != "pending":
+            continue
+        # Check scheduled_at (one-shot timed tasks)
+        if t.get("scheduled_at") and t["scheduled_at"] > now:
+            continue  # Not yet time
+        # Check next_run_at (recurring tasks)
+        if t.get("next_run_at") and t["next_run_at"] > now:
+            continue  # Not yet time
+        ready.append(t)
+    ready.sort(key=lambda t: priority_order.get(t.get("priority", "medium"), 1))
+    return ready
+
+
+def _reset_recurring_task(task: dict):
+    """
+    Reset a recurring task for its next run.
+    Sets status back to pending and computes next_run_at.
+    """
+    interval = task.get("repeat_seconds")
+    if not interval:
+        return
+    task["status"] = "pending"
+    task["last_run_at"] = datetime.now().isoformat()
+    next_run = datetime.now().timestamp() + int(interval)
+    task["next_run_at"] = datetime.fromtimestamp(next_run).isoformat()
+
+
+def _write_notification(task: dict, result: str):
+    """
+    Write a notification to the outbox for WhatsApp delivery.
+    If NOTIFICATION_CHAT_ID is not set, skip silently.
+    bridge.js polls the outbox directory and sends + deletes each file.
+    """
+    if not NOTIFICATION_CHAT_ID:
+        return
+    try:
+        OUTBOX_DIR.mkdir(parents=True, exist_ok=True)
+        task_id = task.get("id", "?")
+        status = task.get("status", "done")
+        # Truncate result to avoid huge messages
+        short_result = result[:500] if result else "(no output)"
+        notification = {
+            "chat_id": NOTIFICATION_CHAT_ID,
+            "text": f"[Task #{task_id}] {status.upper()}: {task.get('description', '')[:100]}\n\n{short_result}",
+            "timestamp": datetime.now().isoformat()
+        }
+        filename = f"task_{task_id}_{int(time.time())}.json"
+        (OUTBOX_DIR / filename).write_text(json.dumps(notification, indent=2))
+    except Exception as e:
+        print(f"[Heartbeat] Notification write error: {e}", file=sys.stderr)
 
 
 def process_task(task: dict, llm) -> str:
@@ -108,18 +169,27 @@ def process_task(task: dict, llm) -> str:
     Process a single task by calling beast.run() with the task description.
     Beast will execute tools, mark the task done/failed, and return a response.
     Uses a dedicated "heartbeat_auto" session to avoid polluting user sessions.
+    Recurring tasks (repeat_seconds) get rescheduled instead of marked done.
     """
     task_id = task.get("id", "?")
     description = task.get("description", "No description")
+    is_recurring = bool(task.get("repeat_seconds"))
 
     # Build a prompt that tells Beast this is an autonomous task
-    prompt = (
-        f"[AUTONOMOUS TASK #{task_id}] {description}\n"
-        f"This is an autonomous task from your task queue. "
-        f"Complete it and report the result. "
-        f"When done, use add_task with task_id={task_id} and status=done to mark it complete. "
-        f"If it fails, use add_task with task_id={task_id} and status=failed."
-    )
+    if is_recurring:
+        # Recurring tasks: don't tell Beast to mark it done (we handle rescheduling)
+        prompt = (
+            f"[AUTONOMOUS TASK #{task_id} - RECURRING] {description}\n"
+            f"This is a recurring autonomous task. Complete it and report the result."
+        )
+    else:
+        prompt = (
+            f"[AUTONOMOUS TASK #{task_id}] {description}\n"
+            f"This is an autonomous task from your task queue. "
+            f"Complete it and report the result. "
+            f"When done, use add_task with task_id={task_id} and status=done to mark it complete. "
+            f"If it fails, use add_task with task_id={task_id} and status=failed."
+        )
 
     session_id = f"heartbeat_task_{task_id}"
 
@@ -128,6 +198,15 @@ def process_task(task: dict, llm) -> str:
     try:
         response = run(prompt, session_id, llm)
         print(f"[Heartbeat] Task #{task_id} response: {response[:100]}...")
+        # Reschedule recurring tasks
+        if is_recurring:
+            data = load_tasks()
+            for t in data["tasks"]:
+                if t.get("id") == task_id:
+                    _reset_recurring_task(t)
+            save_tasks(data)
+            print(f"[Heartbeat] Recurring task #{task_id} rescheduled (every {task.get('repeat_seconds')}s)")
+        _write_notification(task, response)
         return response
     except Exception as e:
         error_msg = f"Error processing task #{task_id}: {e}"
@@ -136,10 +215,17 @@ def process_task(task: dict, llm) -> str:
         data = load_tasks()
         for t in data["tasks"]:
             if t.get("id") == task_id:
-                t["status"] = "failed"
-                t["error"] = str(e)
-                t["updated_at"] = datetime.now().isoformat()
+                if is_recurring:
+                    # Recurring tasks reschedule on failure instead of failing permanently
+                    _reset_recurring_task(t)
+                    t["last_error"] = str(e)
+                    print(f"[Heartbeat] Recurring task #{task_id} rescheduled after error")
+                else:
+                    t["status"] = "failed"
+                    t["error"] = str(e)
+                    t["updated_at"] = datetime.now().isoformat()
         save_tasks(data)
+        _write_notification(task, error_msg)
         return error_msg
 
 

@@ -35,7 +35,8 @@
 import makeWASocket, {
     useMultiFileAuthState,
     DisconnectReason,
-    fetchLatestBaileysVersion
+    fetchLatestBaileysVersion,
+    downloadMediaMessage
 } from '@whiskeysockets/baileys'
 import qrcode from 'qrcode-terminal'
 import fs from 'fs'
@@ -160,6 +161,34 @@ async function connectToWhatsApp() {
             // Auto-backup credentials after successful connection.
             // Wait 2s for Baileys to finish saving credential files first.
             setTimeout(backupAuth, 2000)
+
+            // --- Outbox polling: send task completion notifications ---
+            // Heartbeat writes JSON files to workspace/outbox/ when tasks complete.
+            // We poll every 30s, send each notification via WhatsApp, then delete the file.
+            const outboxDir = path.join(path.dirname(new URL(import.meta.url).pathname), '..', 'workspace', 'outbox')
+            setInterval(async () => {
+                try {
+                    if (!fs.existsSync(outboxDir)) return
+                    const files = fs.readdirSync(outboxDir).filter(f => f.endsWith('.json'))
+                    for (const file of files) {
+                        const filePath = path.join(outboxDir, file)
+                        try {
+                            const notification = JSON.parse(fs.readFileSync(filePath, 'utf-8'))
+                            const chatId = notification.chat_id
+                            const text = notification.text
+                            if (chatId && text) {
+                                await sock.sendMessage(chatId, { text })
+                                console.log(`[Outbox] Sent notification: ${file}`)
+                            }
+                            fs.unlinkSync(filePath)
+                        } catch (err) {
+                            console.error(`[Outbox] Error processing ${file}:`, err.message)
+                        }
+                    }
+                } catch (err) {
+                    // Silently ignore — outbox dir may not exist yet
+                }
+            }, 30000)
         }
     })
 
@@ -202,22 +231,44 @@ async function connectToWhatsApp() {
             if (isFromMe && !isGroup) continue
 
             // Get message text (WhatsApp has two text formats)
-            const text = msg.message?.conversation ||            // Simple text message
-                         msg.message?.extendedTextMessage?.text || // Reply/forwarded text
-                         null
+            let text = msg.message?.conversation ||            // Simple text message
+                       msg.message?.extendedTextMessage?.text || // Reply/forwarded text
+                       null
 
-            if (!text) continue  // Skip non-text messages (images, stickers, etc.)
+            // --- Image input: download image and forward to Beast ---
+            let imagePath = null
+            const imageMessage = msg.message?.imageMessage
+            if (imageMessage) {
+                try {
+                    const mediaDir = path.join(path.dirname(new URL(import.meta.url).pathname), '..', 'workspace', 'media')
+                    if (!fs.existsSync(mediaDir)) fs.mkdirSync(mediaDir, { recursive: true })
+                    const filename = `wa_${Date.now()}.jpg`
+                    imagePath = path.join(mediaDir, filename)
+                    const buffer = await downloadMediaMessage(msg, 'buffer', {})
+                    fs.writeFileSync(imagePath, buffer)
+                    console.log(`[Image] Downloaded: ${imagePath}`)
+                    // Use caption as text, or default prompt
+                    if (!text) text = imageMessage.caption || "What's in this image?"
+                } catch (imgErr) {
+                    console.error('[Image] Download failed:', imgErr.message)
+                    imagePath = null
+                }
+            }
+
+            if (!text && !imagePath) continue  // Skip non-text/non-image messages (stickers, etc.)
 
             // Log with chat ID so user can identify which chat to add to ALLOWED_GROUPS
-            console.log(`\n[${isGroup ? 'GROUP' : 'DM'}][${chatId}][${sender}] ${text.substring(0, 50)}...`)
+            console.log(`\n[${isGroup ? 'GROUP' : 'DM'}][${chatId}][${sender}] ${(text || '(image)').substring(0, 50)}...`)
 
             try {
                 // Forward message to Python server (server.py)
                 // sender and chat_id are used for authorization checks
+                const body = { text: text || "What's in this image?", sender, chat_id: chatId }
+                if (imagePath) body.image_path = imagePath
                 const response = await fetch(`${BEAST_URL}/message`, {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ text, sender, chat_id: chatId })
+                    body: JSON.stringify(body)
                 })
 
                 if (!response.ok) {
@@ -232,7 +283,7 @@ async function connectToWhatsApp() {
 
                 const data = await response.json()
                 const reply = data.response
-                const imagePath = data.image  // Optional: screenshot path from Beast
+                const replyImagePath = data.image  // Optional: screenshot path from Beast
 
                 // Send text reply back to the WhatsApp chat
                 if (reply) {
@@ -241,10 +292,10 @@ async function connectToWhatsApp() {
                 }
 
                 // Send image if Beast included one (e.g., from screenshot tool)
-                if (imagePath && fs.existsSync(imagePath)) {
-                    console.log(`[Image] Sending ${imagePath}`)
+                if (replyImagePath && fs.existsSync(replyImagePath)) {
+                    console.log(`[Image] Sending ${replyImagePath}`)
                     await sock.sendMessage(chatId, {
-                        image: fs.readFileSync(imagePath),
+                        image: fs.readFileSync(replyImagePath),
                         caption: 'Screenshot'
                     })
                 }

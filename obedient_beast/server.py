@@ -130,6 +130,7 @@ def message():
     text = data.get("text", "").strip()
     sender = data.get("sender", "unknown")
     chat_id = data.get("chat_id", "")
+    image_path = data.get("image_path")  # Optional: image from WhatsApp
 
     if not text:
         return jsonify({"error": "No text provided"}), 400
@@ -159,7 +160,7 @@ def message():
     session_id = f"wa_{sender.split('@')[0]}"
 
     try:
-        response = run(text, session_id, llm)
+        response = run(text, session_id, llm, image_path=image_path)
         print(f"[Response] {response[:100]}...")
 
         # Check if Beast generated an image (e.g., screenshot tool was used).
