@@ -8,6 +8,8 @@ Dynamically scans model directories and serves any compatible model locally.
 
 Model type (text vs vision) is auto-detected from `config.json`.
 
+> This is the **Local brain** for [Obedient Beast](README.md). Beast connects to this server when you use `/lfm` mode. See [README.md](README.md) for the full project overview.
+
 ## Usage
 
 ```bash
@@ -53,4 +55,23 @@ pm2 restart lfm-thinking
 pm2 stop lfm-thinking
 pm2 delete lfm-thinking # remove from pm2 entirely before re-adding
 pm2 save                # persist across reboots (pair with: pm2 startup)
+```
+
+## Hot-Swap Models (no restart needed)
+
+While the server is running, switch models via the API or from Beast:
+
+```bash
+# From Beast CLI or WhatsApp
+/model Qwen3         # switch by name (fuzzy match)
+/model latest        # switch to most recently downloaded
+/model               # list all available models
+
+# Via curl
+curl -X POST http://localhost:8000/v1/models/switch \
+  -H "Content-Type: application/json" \
+  -d '{"model": "GLM"}'
+
+# List all models
+curl http://localhost:8000/v1/models/available
 ```

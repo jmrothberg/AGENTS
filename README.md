@@ -306,18 +306,20 @@ Think of Beast like a smart intern sitting at your computer. You tell it what yo
 
 ### Two Brain Modes
 
-Beast has two power levels. You pick which AI "brain" it uses:
+Beast has two modes. You pick which AI "brain" it uses:
 
-| | **FULL mode** (Claude or OpenAI) | **LITE mode** (local model on your machine) |
+| | **Cloud** (Claude or OpenAI) | **Local** (model on your machine) |
 |---|---|---|
 | **Best for** | Complex tasks, research, multi-step work | Quick tasks, total privacy |
-| **How smart** | Can chain 10 actions together, thinks deeply | Does one thing at a time, keeps it simple |
+| **Default depth** | 10 steps per request | 5 steps per request |
 | **Privacy** | Messages go to cloud AI | Everything stays on your machine |
 | **Cost** | Uses API credits | Free (your hardware does the work) |
-| **Extra skills** | All MCP servers available | Only the simple MCP servers load |
+| **MCP skills** | All loaded | All loaded (same) |
 | **Switch to it** | `/claude` or `/openai` | `/lfm` |
 
-You can switch between modes anytime, even mid-conversation. Your local model server (the `lfm_thinking.py` or `linux_thinking.py` script from above) must be running in a separate terminal for LITE mode to work.
+"**Depth**" is how many tool-call steps Beast can chain together per request (e.g., search → fetch page → summarize = 3 steps). Change it anytime with `/depth 3`. Strong local models like Qwen3.5-122B handle multi-step chains well.
+
+You can switch between modes anytime, even mid-conversation. Your local model server (`lfm_thinking.py` or `linux_thinking.py`) must be running for Local mode to work.
 
 ---
 
@@ -336,13 +338,19 @@ There are 5 programs. Here is what each one does:
 ### Data Flow
 
 ```
-YOU (terminal)  -->  beast.py  -->  LLM server (port 8000)  -->  response
-YOU (WhatsApp)  -->  bridge.js  -->  server.py  -->  beast.py  -->  LLM server  -->  response
+                         ┌─────────────┐
+YOU (terminal) ─────────►│             │      Cloud brain        ┌──────────────┐
+                         │  beast.py   │─────(/claude /openai)──►│ Claude/OpenAI│
+YOU (WhatsApp) ──bridge──►  agent loop  │                        │   (API)      │
+     .js──►server.py────►│             │      Local brain        ├──────────────┤
+                         │  depth: N   │─────(/lfm)────────────►│lfm_thinking  │
+                         │  tool steps │                        │  (port 8000) │
+                         └─────────────┘                        └──────────────┘
 ```
 
-The LLM server (`linux_thinking.py` on Linux, `lfm_thinking.py` on macOS) is **always separate** -- you start it in its own terminal (interactive) or via pm2 with `--model latest --server` (headless).
+The LLM server (`lfm_thinking.py` on macOS, `linux_thinking.py` on Linux) is **always separate** — start it in its own terminal or via pm2 with `--model Qwen3.5-122B --server`.
 
-If you use Claude or OpenAI as backend instead of local LLM, you do NOT need the LLM server at all -- Beast talks directly to the cloud API.
+If you use Cloud brain (Claude/OpenAI), you do NOT need the LLM server — Beast talks directly to the cloud API.
 
 ---
 
@@ -447,20 +455,16 @@ pm2 startup    # Follow the sudo command it prints
 **Note:** `beast.py` (the CLI) is interactive and cannot run under pm2. `lfm_thinking.py` can now run under pm2 using the `--model` and `--server` flags:
 
 ```bash
-# Add the local model server to pm2 (serves the most recent model)
+# Add the local model server to pm2
 pm2 start ~/AGENTS/lfm_thinking.py \
-    --name lfm-server \
+    --name lfm-thinking \
     --interpreter ~/AGENTS/.venv/bin/python3 \
     --cwd ~/AGENTS \
-    -- --model latest --server
-
-# Or serve a specific model
-pm2 start ~/AGENTS/lfm_thinking.py \
-    --name lfm-server \
-    --interpreter ~/AGENTS/.venv/bin/python3 \
-    --cwd ~/AGENTS \
-    -- --model Qwen3.5 --server --port 8000
+    --max-restarts 3 --restart-delay 10000 \
+    -- --model Qwen3.5-122B --server
 ```
+
+> **Why `--max-restarts 3` and `--restart-delay 10000`?** Large models (122B+ params) take a long time to load. Without these flags, pm2 kills the process mid-load and restarts it in an infinite crash loop.
 
 **Switch the model without restarting** (while the server is running):
 ```bash
@@ -564,7 +568,8 @@ The setup script creates a Python virtual environment, installs dependencies, an
                                     │
                         ┌───────────┴──────────┐
                         │  capabilities.py     │
-                        │  FULL vs LITE tiers  │
+                        │  Cloud vs Local      │
+                        │  + /depth control    │
                         └──────────────────────┘
 ```
 
@@ -575,7 +580,7 @@ The setup script creates a Python virtual environment, installs dependencies, an
 | `beast.py` | ~1270 | Agent loop + 18 built-in tools + CLI + slash commands + local memory |
 | `llm.py` | ~405 | Unified LLM client (Claude/OpenAI/local with dual tool-calling) |
 | `server.py` | ~173 | Flask HTTP server -- **only needed for WhatsApp** |
-| `capabilities.py` | ~109 | Tiered settings (FULL/LITE) + MCP tier filtering |
+| `capabilities.py` | ~109 | Cloud vs Local settings, depth control, MCP tier filtering |
 | `heartbeat.py` | ~263 | Autonomous task scheduler (processes task queue on a timer) |
 | `mcp_client.py` | ~420 | MCP server connection manager with tier filtering |
 | `config/mcp_servers.json` | ~95 | MCP server catalog with 11 servers across 3 tiers |
@@ -631,7 +636,7 @@ The setup script creates a Python virtual environment, installs dependencies, an
 
 Enable MCP by setting `MCP_ENABLED=true` in `.env`. Servers are launched via `npx` (requires Node.js).
 
-**All MCP tiers load in both LITE and FULL mode.** Local LLMs need access to cloud tools like brave-search for web queries. The tier labels are organizational only. LITE mode limits tool-calling behavior (single-tool mode, 2 max turns) to prevent loops — it doesn't restrict which servers load.
+**All MCP tiers load in both Cloud and Local mode.** Local LLMs need access to cloud tools like brave-search for web queries. The tier labels are organizational only — they don't restrict which servers load.
 
 ### Essential Tier (always loaded)
 
@@ -642,7 +647,7 @@ Enable MCP by setting `MCP_ENABLED=true` in `.env`. Servers are launched via `np
 | **time** | `npx -y @modelcontextprotocol/server-time` | Time/timezone queries (1-2 tools) |
 | **fetch** | `npx -y @modelcontextprotocol/server-fetch` | HTTP fetching via MCP |
 
-### Extended Tier (FULL mode only)
+### Extended Tier (always loaded)
 
 | Server | Install Command | What It Does |
 |--------|----------------|--------------|
@@ -651,7 +656,7 @@ Enable MCP by setting `MCP_ENABLED=true` in `.env`. Servers are launched via `np
 | **sequential-thinking** | `npx -y @modelcontextprotocol/server-sequential-thinking` | Step-by-step complex reasoning |
 | **playwright** | `npx -y @anthropic/mcp-server-playwright` | Full browser automation |
 
-### Cloud-Only Tier (FULL mode + API keys)
+### Cloud Tier (needs API keys — works from both Cloud and Local brains)
 
 | Server | Install Command | What It Needs |
 |--------|----------------|---------------|
@@ -699,13 +704,17 @@ python3 beast.py  # Uses LLM_BACKEND from .env
 
 This overrides your `.env` setting just for that session -- your main config stays unchanged.
 
-### Local Model Single-Tool Mode
+### Depth — Controlling Tool-Call Chains
 
-Local LLMs (Qwen3, GLM-4, etc.) currently tend to loop on tool calls instead of summarizing results. Beast automatically limits local models (the "lfm" backend) to **one tool call per request**, then forces a text response. This is controlled by `capabilities.py`.
+"Depth" controls how many tool-call steps the model can chain per request. Cloud defaults to 10, Local defaults to 5. Adjust at runtime:
 
-**When local LLMs improve**, edit `capabilities.py` and change `SINGLE_TOOL_MODE` and `MAX_TOOL_TURNS`.
+```
+/depth 3    → chain up to 3 steps per request (faster, simpler)
+/depth 10   → chain up to 10 steps (more complex tasks)
+/depth      → show current depth
+```
 
-Claude and OpenAI handle multi-tool calls properly and get the full tier automatically.
+Strong local models (Qwen3.5-122B, etc.) handle multi-step chains well. If you're using a smaller/weaker local model and it loops, reduce depth with `/depth 2`.
 
 ## Slash Commands (work in both WhatsApp and CLI)
 
@@ -713,13 +722,17 @@ Claude and OpenAI handle multi-tool calls properly and get the full tier automat
 |---------|-------------|
 | `/help` | Quick help with top commands |
 | `/more` | Full detailed help with examples |
-| `/status` | Show backend, tier, heartbeat state, task summary |
+| `/status` | Show brain mode, depth, heartbeat state, task summary |
 | `/tasks` | List all tasks with status |
 | `/done 3` | Mark task #3 as done |
 | `/drop 3` | Remove task #3 |
-| `/claude` | Switch to Claude backend (FULL tier) |
-| `/openai` | Switch to OpenAI backend (FULL tier) |
-| `/lfm` | Switch to local LFM backend (LITE tier) |
+| `/claude` | Switch to Cloud brain (Claude) |
+| `/openai` | Switch to Cloud brain (OpenAI) |
+| `/lfm` | Switch to Local brain |
+| `/depth 5` | Set tool-chain depth (steps per request, range 1-20) |
+| `/depth` | Show current depth |
+| `/model` | List available local models |
+| `/model Qwen3` | Hot-swap local model (no restart needed) |
 | `/heartbeat on` | Enable background task processing |
 | `/heartbeat off` | Pause background task processing |
 | `/heartbeat` | Show heartbeat status |
@@ -728,7 +741,7 @@ Claude and OpenAI handle multi-tool calls properly and get the full tier automat
 | `/clear memory` | Clear saved memories (local JSON) |
 | `/clear all` | Clear everything (history + tasks + memory) |
 | `/tools` | List all available tools |
-| `/skills` | MCP server catalog with install commands (3 tiers) |
+| `/skills` | MCP server catalog with install commands |
 
 **CLI-only commands:**
 
@@ -788,7 +801,7 @@ python heartbeat.py --status     # Show task queue
 ```
 
 **How it works:**
-1. Heartbeat wakes up every N minutes (5 min on Claude, 10 min on local models)
+1. Heartbeat wakes up every N minutes (5 min Cloud, 10 min Local)
 2. Checks `workspace/tasks.json` for pending tasks
 3. Picks the highest-priority task and feeds it to `beast.run()`
 4. Beast processes it (using tools as needed) and marks it done/failed
@@ -814,20 +827,19 @@ Beast saves 4 types of data. Each can be cleared independently:
 - The MCP knowledge graph is separate because it runs as an external server — Beast can't directly delete its data with a slash command, but you can ask Beast to do it via the MCP tools
 - `/new` (CLI only) starts a fresh conversation **without** deleting anything
 
-## Capability Tiers
+## Cloud vs Local — Settings
 
-Beast automatically adjusts its power based on which LLM backend is active:
+Beast automatically adjusts settings based on which brain is active:
 
-| Setting | Claude/OpenAI (FULL) | Local Models (LITE) |
-|---------|---------------------|-------------------|
-| Max tool calls per turn | 10 | 2 |
-| Single-tool mode | Off | On (prevents loops) |
+| Setting | Cloud (Claude/OpenAI) | Local (your machine) |
+|---------|----------------------|---------------------|
+| Default depth (tool steps) | 10 | 5 |
 | Heartbeat interval | 5 min | 10 min |
-| Tasks per heartbeat cycle | 3 | 1 |
-| Memory detail saved | Full context | Key facts only |
-| MCP tiers loaded | All (Essential+Extended+Cloud) | All (same — local LLM needs web search etc.) |
+| Tasks per heartbeat cycle | 3 | 2 |
+| Memory detail saved | Full | Full |
+| MCP servers loaded | All | All |
 
-Tiers are set in `capabilities.py` and auto-detect from `LLM_BACKEND` in `.env`.
+Depth is adjustable at runtime with `/depth N`. Settings are in `capabilities.py` and auto-detect from `LLM_BACKEND` in `.env`.
 
 ## WhatsApp Setup
 
@@ -919,7 +931,7 @@ Beast normally stays quiet in shared group chats (groups with other people). To 
 | Persistent Memory | Via plugins | Built-in (MCP graph + local JSON fallback) |
 | Web/HTTP Fetching | Via plugins | Built-in `fetch_url` + MCP fetch server |
 | Backend Switching | ❌ | `/claude` `/openai` `/lfm` live |
-| Capability Tiers | ❌ | Auto (FULL/LITE by backend) |
+| Depth Control | ❌ | `/depth N` — tune tool-chain steps at runtime |
 | MCP Tier Organization | ❌ | 3-tier catalog (Essential/Extended/Cloud) |
 | Auto Memory Recall | ❌ | ✅ At session start |
 | Codebase Size | 150k+ lines | ~2.7k lines (heavily commented) |
