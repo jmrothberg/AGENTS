@@ -1248,69 +1248,95 @@ I'm an AI assistant that lives on your computer. You talk to me (here in the ter
 
     all_tools = get_all_tools()  # Built-in (18) + MCP tools
 
-    for turn in range(DEPTH):
-        current_tools = all_tools
+    # --- Context cap: prevent blowing the LLM context window ---
+    # Long sessions with many tool calls grow unbounded. This trims old messages
+    # to keep the most recent ones within a safe token budget. The full history
+    # is preserved in the session JSONL file — only the working context is capped.
+    MAX_HISTORY_CHARS = 80000  # ~20k tokens, safe for most models
+    history_size = sum(len(json.dumps(m)) for m in history)
+    if history_size > MAX_HISTORY_CHARS:
+        trimmed = []
+        budget = MAX_HISTORY_CHARS
+        for msg in reversed(history):
+            msg_size = len(json.dumps(msg))
+            if budget - msg_size < 0 and trimmed:
+                break
+            trimmed.append(msg)
+            budget -= msg_size
+        history = list(reversed(trimmed))
+        print(f"[Beast] Context trimmed to {len(history)} messages", file=sys.stderr)
 
-        # Call LLM — sends conversation history + system prompt + tools
-        response = llm.chat(history, tools=current_tools, system=SYSTEM_PROMPT)
+    for turn in range(DEPTH):
+        # Call LLM — sends conversation history + system prompt + tools.
+        # Wrapped in try/except so connection errors, timeouts, and rate limits
+        # return a message to the user instead of crashing the agent loop.
+        try:
+            response = llm.chat(history, tools=all_tools, system=SYSTEM_PROMPT)
+        except Exception as e:
+            print(f"[Beast] LLM error: {e}", file=sys.stderr)
+            return f"LLM error: {e}"
 
         if response.tool_calls:
-            # LLM wants to use tools — execute each one
+            # --- Build ONE assistant message with ALL tool calls ---
+            # Both Claude and OpenAI expect a single assistant message containing
+            # all tool calls, not separate messages per call. The old code created
+            # one assistant message per tool call, which produced malformed history.
+            if llm.backend == "claude":
+                assistant_msg = {"role": "assistant", "content": []}
+                if response.text:
+                    assistant_msg["content"].append({"type": "text", "text": response.text})
+                for tc in response.tool_calls:
+                    assistant_msg["content"].append(
+                        {"type": "tool_use", "id": tc.id, "name": tc.name, "input": tc.args}
+                    )
+            else:
+                # OpenAI / local format: all tool_calls in one array
+                assistant_msg = {
+                    "role": "assistant",
+                    "content": response.text or None,
+                    "tool_calls": [
+                        {
+                            "id": tc.id,
+                            "type": "function",
+                            "function": {"name": tc.name, "arguments": json.dumps(tc.args)}
+                        }
+                        for tc in response.tool_calls
+                    ]
+                }
+
+            history.append(assistant_msg)
+            save_message(session_id, assistant_msg)
+
+            # Execute each tool and collect results
+            tool_results = []
             for tool_call in response.tool_calls:
                 print(f"  [Tool: {tool_call.name}({tool_call.args})]", file=sys.stderr)
                 result = execute_tool(tool_call.name, tool_call.args)
+                tool_results.append((tool_call, result))
 
-                # ---------------------------------------------------------------------------
-                # Claude vs OpenAI message format differences:
-                # ---------------------------------------------------------------------------
-                # Claude uses content blocks: [{"type": "tool_use", ...}] for tool calls
-                #   and {"role": "user", content: [{"type": "tool_result", ...}]} for results.
-                # OpenAI uses: {"role": "assistant", tool_calls: [...]} for tool calls
-                #   and {"role": "tool", tool_call_id: "...", content: "..."} for results.
-                # We build the correct format based on which backend is active.
-
-                if llm.backend == "claude":
-                    # Claude format: tool_use blocks in assistant content array
-                    assistant_msg = {
-                        "role": "assistant",
-                        "content": [
-                            {"type": "tool_use", "id": tool_call.id, "name": tool_call.name, "input": tool_call.args}
-                        ]
-                    }
-                    if response.text:
-                        assistant_msg["content"].insert(0, {"type": "text", "text": response.text})
-                else:
-                    # OpenAI format: tool_calls array on assistant message
-                    assistant_msg = {
-                        "role": "assistant",
-                        "content": response.text or None,
-                        "tool_calls": [{
-                            "id": tool_call.id,
-                            "type": "function",
-                            "function": {"name": tool_call.name, "arguments": json.dumps(tool_call.args)}
-                        }]
-                    }
-
-                history.append(assistant_msg)
-                save_message(session_id, assistant_msg)
-
-                # Add tool result in the correct format
-                if llm.backend == "claude":
-                    # Claude: tool results go in a "user" message with tool_result content
-                    tool_result_msg = {
-                        "role": "user",
-                        "content": [{"type": "tool_result", "tool_use_id": tool_call.id, "content": result}]
-                    }
-                else:
-                    # OpenAI: tool results are "tool" role messages
+            # Add tool results in the correct format
+            if llm.backend == "claude":
+                # Claude: ALL results in one user message (API requires this
+                # when the assistant message has multiple tool_use blocks)
+                tool_result_msg = {
+                    "role": "user",
+                    "content": [
+                        {"type": "tool_result", "tool_use_id": tc.id, "content": res}
+                        for tc, res in tool_results
+                    ]
+                }
+                history.append(tool_result_msg)
+                save_message(session_id, tool_result_msg)
+            else:
+                # OpenAI / local: separate "tool" role messages
+                for tool_call, result in tool_results:
                     tool_result_msg = {
                         "role": "tool",
                         "tool_call_id": tool_call.id,
                         "content": result
                     }
-
-                history.append(tool_result_msg)
-                save_message(session_id, tool_result_msg)
+                    history.append(tool_result_msg)
+                    save_message(session_id, tool_result_msg)
 
         else:
             # No tool calls — LLM returned a text response, we're done

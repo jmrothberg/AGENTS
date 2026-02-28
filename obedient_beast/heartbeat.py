@@ -121,7 +121,7 @@ def process_task(task: dict, llm) -> str:
         f"If it fails, use add_task with task_id={task_id} and status=failed."
     )
 
-    session_id = "heartbeat_auto"
+    session_id = f"heartbeat_task_{task_id}"
 
     print(f"[Heartbeat] Processing task #{task_id}: {description[:60]}...")
 
