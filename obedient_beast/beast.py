@@ -3,8 +3,9 @@
 Obedient Beast - CLI + Agent Loop + Tools
 ==========================================
 A minimal agentic assistant with tool calling, autonomous task queue,
-persistent memory, and tiered capabilities (FULL for Claude/OpenAI,
-LITE for local models via "lfm" backend — legacy name, works with any local model).
+persistent memory, and two brain modes: Cloud (Claude/OpenAI) and Local
+(any model via "lfm" backend). "Depth" controls how many tool steps
+the model can chain per request (adjustable at runtime with /depth).
 
 Architecture Overview:
 ~~~~~~~~~~~~~~~~~~~~~~
@@ -45,7 +46,7 @@ Usage:
 
 Slash commands (work from CLI and WhatsApp):
     /help, /more, /status, /tasks, /done <id>, /drop <id>,
-    /claude, /openai, /lfm, /heartbeat on|off,
+    /claude, /openai, /lfm, /depth <n>, /model, /heartbeat on|off,
     /clear, /clear tasks, /clear memory, /clear all, /tools, /skills
 """
 
@@ -192,7 +193,7 @@ SYSTEM_PROMPT = load_system_prompt()
 # facts even without the MCP memory server running. Facts are stored in
 # workspace/memory.json as a flat list with timestamps.
 # The MCP memory server (knowledge graph) is richer, but this ensures
-# memory always works, even offline or in LITE mode.
+# memory always works, even offline or in Local mode.
 
 def _load_local_memory() -> dict:
     """Load local memory from workspace/memory.json. Returns {"facts": [...]}."""
@@ -778,12 +779,10 @@ def run(user_input: str, session_id: str = "default", llm=None) -> str:
     5. If LLM returns text only: save it and return to the user
     6. Auto-save key facts to memory (both MCP and local JSON)
 
-    Loop prevention (SINGLE_TOOL_MODE / tools_used):
-    - Local LLMs tend to loop on tool calls instead of summarizing.
-    - In LITE mode (local LLMs), after the first tool call, we stop sending
-      tools to the LLM. This forces it to generate a text response using
-      the tool results it already has.
-    - Cloud LLMs (Claude/OpenAI) handle multi-tool properly and always see all tools.
+    Depth (tool-chain limit):
+    - "Depth" controls how many tool steps the model can chain (set via /depth).
+    - Cloud default: 10, Local default: 5. Prevents infinite loops.
+    - All tools are always available on every step.
     """
     # Apply backend override if set (from /claude /openai /lfm commands)
     global _backend_override
@@ -859,7 +858,8 @@ def run(user_input: str, session_id: str = "default", llm=None) -> str:
 
     # --- /help (short) ---
     if cmd == "/help":
-        return """🐺 **Obedient Beast — Your Personal AI Assistant**
+        from capabilities import DEPTH, TIER_LABEL
+        return f"""🐺 **Obedient Beast — Your Personal AI Assistant**
 
 **What can I do?**
 Just talk to me like a person. I can:
@@ -872,28 +872,23 @@ Just talk to me like a person. I can:
 • Work on tasks by myself in the background
 
 **Two brain modes:**
-• **FULL** (Claude or OpenAI) — chains multiple actions, thinks deeply
-• **LITE** (local model) — one thing at a time, simpler but totally private
+• **Cloud** (Claude or OpenAI) — powerful, fast, uses the internet
+• **Local** (runs on your machine) — private, your data never leaves
 
-**All Commands:**
-`/status` — current brain, pending tasks, heartbeat info
+Currently: **{TIER_LABEL}** — depth {DEPTH} (chains up to {DEPTH} steps per request)
+
+**Commands:**
+`/status` — current brain, tasks, heartbeat info
 `/tasks` — list all tasks
 `/done 3` — mark task #3 complete
 `/drop 3` — delete task #3
-`/claude` — switch to Claude brain (FULL)
-`/openai` — switch to OpenAI brain (FULL)
-`/lfm` — switch to local brain (LITE)
+`/claude` — switch to Cloud (Claude)
+`/openai` — switch to Cloud (OpenAI)
+`/lfm` — switch to Local brain
+`/depth 3` — set how many steps I can chain (current: {DEPTH})
+`/model` — list/switch local models (hot-swap, no restart)
 `/heartbeat on|off` — toggle background task processing
-
-**Switch local model (hot-swap, no restart needed):**
-`/model` — list all available local models
-`/model latest` — switch to the most recently downloaded model
-`/model GLM` — switch to a model by name (fuzzy match)
-`/model 3` — switch to a model by number
-`/clear` — clear chat history
-`/clear tasks` — clear task list
-`/clear memory` — clear saved memories (local)
-`/clear all` — clear everything (history + tasks + memory)
+`/clear` — clear chat history (`/clear tasks`, `/clear memory`, `/clear all`)
 `/tools` — list all my abilities
 `/skills` — installable MCP plug-in skills
 `/more` — detailed guide with examples
@@ -906,25 +901,31 @@ Just talk to me like a person. I can:
 
     # --- /more (detailed) ---
     if cmd == "/more":
-        return """🐺 **Obedient Beast — Full Guide**
+        from capabilities import DEPTH
+        return f"""🐺 **Obedient Beast — Full Guide**
 
 **What am I?**
 I'm an AI assistant that lives on your computer. You talk to me (here in the terminal or via WhatsApp), I understand what you want, and I use tools to get it done. Think of me like a smart intern who can use your computer.
 
-**Two Brain Modes (important!):**
-Your AI brain determines how smart and capable I am:
+**Two Brain Modes:**
 
-  🧠 **FULL mode** — Using Claude or OpenAI (cloud AI)
-     I can do complex multi-step tasks, chain 10 actions together,
-     remember rich details, and use all my extra skills.
-     Best for: complex requests, research, multi-file editing.
+  🌐 **Cloud** — Claude or OpenAI (over the internet)
+     Powerful, fast, great at complex multi-step tasks.
+     Best for: research, multi-file editing, hard questions.
+     Switch: `/claude` or `/openai`
 
-  🧠 **LITE mode** — Using a local model running on your machine
-     I do one thing at a time and keep it simple.
+  🏠 **Local** — A model running on your machine (e.g. Qwen3.5-122B)
      Your data never leaves your computer. Totally private.
-     Best for: quick tasks, privacy-sensitive work.
+     Strong local models can chain multiple steps, just like cloud.
+     Switch: `/lfm` — swap models with `/model`
 
-  Switch anytime: `/claude` `/openai` `/lfm`
+**Depth (how many steps I can chain):**
+  When you ask me something complex, I may need multiple steps —
+  search the web, then fetch a page, then summarize it.
+  "Depth" controls how many steps I can chain per request.
+  • Cloud default: 10 steps — Local default: 5 steps
+  • Change it anytime: `/depth 3` (fewer steps = faster, simpler)
+  • Current depth: {DEPTH}
 
 **My 18 Built-in Abilities:**
   Files — read, write, edit files, list folders
@@ -959,8 +960,7 @@ Your AI brain determines how smart and capable I am:
   I can learn new abilities by connecting to MCP servers.
   Think of them as plug-in skills. Type `/skills` to see
   what's available (web search, GitHub, browser automation, etc.)
-  All skills load in both LITE and FULL mode — I can use web search
-  and other cloud tools even with a local brain.
+  All skills load in both Cloud and Local mode.
 
 **All Commands:**
   `/help` — short help
@@ -968,15 +968,13 @@ Your AI brain determines how smart and capable I am:
   `/tasks` — see all tasks
   `/done 3` — mark task #3 complete
   `/drop 3` — delete task #3
-  `/clear` — clear chat history
-  `/clear tasks` — clear task list
-  `/clear memory` — clear saved memories (local)
-  `/clear all` — clear everything (history + tasks + memory)
+  `/clear` — clear history (`/clear tasks`, `/clear memory`, `/clear all`)
   `/tools` — list all my abilities
   `/skills` — list installable MCP skills
-  `/claude` — switch to Claude brain (FULL)
-  `/openai` — switch to OpenAI brain (FULL)
-  `/lfm` — switch to local brain (LITE)
+  `/claude` — switch to Cloud (Claude)
+  `/openai` — switch to Cloud (OpenAI)
+  `/lfm` — switch to Local brain
+  `/depth 5` — set tool-chain depth (steps per request)
   `/model` — list local models / `/model Qwen3` to hot-swap
   `/heartbeat on|off` — toggle autopilot
   `/new` — start fresh conversation (CLI only)
@@ -986,7 +984,7 @@ Your AI brain determines how smart and capable I am:
     if cmd == "/skills":
         return """🐺 **MCP Server Catalog**
 
-**Essential Tier** (local LLM friendly, loaded by default):
+**Essential Tier** (always loaded):
   • filesystem — `npx -y @modelcontextprotocol/server-filesystem /Users/jonathanrothberg`
     File search/move beyond built-in tools
   • memory — `npx -y @modelcontextprotocol/server-memory`
@@ -996,7 +994,7 @@ Your AI brain determines how smart and capable I am:
   • fetch — `npx -y @modelcontextprotocol/server-fetch`
     HTTP fetching, works on LAN too
 
-**Extended Tier** (loaded in FULL mode, local LLM can use with guidance):
+**Extended Tier** (always loaded):
   • sqlite — `npx -y @modelcontextprotocol/server-sqlite`
     Local database queries
   • git — `npx -y @modelcontextprotocol/server-git`
@@ -1006,7 +1004,7 @@ Your AI brain determines how smart and capable I am:
   • playwright — `npx -y @anthropic/mcp-server-playwright`
     Full browser automation
 
-**Cloud-only Tier** (needs Claude/OpenAI + API keys):
+**Cloud Tier** (needs API keys, works from both Cloud and Local brains):
   • brave-search — `npx -y @modelcontextprotocol/server-brave-search`
     Web search (needs BRAVE_API_KEY)
   • github — `npx -y @modelcontextprotocol/server-github`
@@ -1022,12 +1020,12 @@ Your AI brain determines how smart and capable I am:
         new_backend = cmd.lstrip("/")
         _backend_override = new_backend
         os.environ["LLM_BACKEND_TEST"] = new_backend
-        # Reload capabilities for the new backend tier
+        # Reload capabilities for the new backend
         import importlib
         import capabilities
         importlib.reload(capabilities)
-        from capabilities import TIER_LABEL as new_tier, MAX_TOOL_TURNS as new_max
-        return f"🔄 Switched to **{new_backend}** backend. Tier: {new_tier} (max {new_max} tool turns)"
+        from capabilities import TIER_LABEL as new_tier, DEPTH as new_depth
+        return f"🔄 Switched to **{new_tier}** ({new_backend}). Depth: {new_depth} steps."
 
     # --- /model — list local models or switch the active model ---
     if cmd == "/model" or cmd.startswith("/model "):
@@ -1160,9 +1158,24 @@ Your AI brain determines how smart and capable I am:
         control_file.write_text(json.dumps({"enabled": False}, indent=2))
         return "🔴 Heartbeat disabled. Background processor will pause."
 
+    # --- /depth — view or set tool-chain depth ---
+    if cmd == "/depth" or cmd.startswith("/depth "):
+        from capabilities import DEPTH, set_depth
+        arg = cmd[len("/depth"):].strip()
+        if arg:
+            try:
+                new_depth = int(arg)
+                set_depth(new_depth)
+                from capabilities import DEPTH as updated
+                return f"Depth set to **{updated}** — I'll chain up to {updated} tool steps per request."
+            except ValueError:
+                return f"Usage: `/depth 5` (a number). Current depth: {DEPTH}"
+        else:
+            return f"Current depth: **{DEPTH}** steps per request.\nChange it: `/depth 3` (1-20)"
+
     # --- /status — overview of everything ---
     if cmd == "/status":
-        from capabilities import TIER_LABEL, MAX_TOOL_TURNS, HEARTBEAT_INTERVAL_SEC
+        from capabilities import TIER_LABEL, DEPTH, HEARTBEAT_INTERVAL_SEC
         tasks_file = WORKSPACE / "tasks.json"
         control_file = WORKSPACE / "heartbeat_control.json"
         hb_enabled = True
@@ -1174,9 +1187,8 @@ Your AI brain determines how smart and capable I am:
         hb_state = "🟢 ON" if hb_enabled else "🔴 OFF"
         status_lines = [
             f"🐺 **Beast Status**",
-            f"  Backend: {_backend_override or os.getenv('LLM_BACKEND_TEST') or os.getenv('LLM_BACKEND', 'lfm')}",
-            f"  Tier: {TIER_LABEL}",
-            f"  Max tool turns: {MAX_TOOL_TURNS}",
+            f"  Brain: {TIER_LABEL} ({_backend_override or os.getenv('LLM_BACKEND_TEST') or os.getenv('LLM_BACKEND', 'lfm')})",
+            f"  Depth: {DEPTH} steps per request",
             f"  Heartbeat: {hb_state} (every {HEARTBEAT_INTERVAL_SEC // 60} min)",
         ]
         if tasks_file.exists():
@@ -1228,29 +1240,16 @@ Your AI brain determines how smart and capable I am:
         save_message(session_id, user_msg)
 
     # ---------------------------------------------------------------------------
-    # Capability-tiered settings (from capabilities.py)
+    # Depth — how many tool-call steps the model can chain per request.
+    # Controlled by /depth command or capabilities.py defaults.
+    # Cloud default: 10, Local default: 5. User can change at runtime.
     # ---------------------------------------------------------------------------
-    # MAX_TOOL_TURNS: how many LLM↔tool round-trips before forcing a text response.
-    #   FULL (Claude/OpenAI): 10 turns — enough for complex multi-step tasks.
-    #   LITE (local LLM): 2 turns — prevents infinite loops.
-    # SINGLE_TOOL_MODE: after first tool use, stop sending tools to the LLM.
-    #   Only active in LITE mode. Forces the LLM to summarize instead of looping.
-    from capabilities import MAX_TOOL_TURNS, SINGLE_TOOL_MODE
+    from capabilities import DEPTH
 
-    max_turns = MAX_TOOL_TURNS
     all_tools = get_all_tools()  # Built-in (18) + MCP tools
-    tools_used = False  # Track if we've already used a tool (for loop prevention)
 
-    for turn in range(max_turns):
-        # Determine which tools to send based on backend and capability tier
-        if SINGLE_TOOL_MODE and tools_used:
-            # LITE mode (local LFM): Don't send tools after first use.
-            # This forces the model to summarize the tool result instead of
-            # making another tool call (local LLMs tend to loop otherwise).
-            current_tools = None
-        else:
-            # FULL mode (Claude/OpenAI): Always send all tools.
-            current_tools = all_tools
+    for turn in range(DEPTH):
+        current_tools = all_tools
 
         # Call LLM — sends conversation history + system prompt + tools
         response = llm.chat(history, tools=current_tools, system=SYSTEM_PROMPT)
@@ -1313,9 +1312,6 @@ Your AI brain determines how smart and capable I am:
                 history.append(tool_result_msg)
                 save_message(session_id, tool_result_msg)
 
-            # Mark that tools have been used (for SINGLE_TOOL_MODE loop prevention)
-            tools_used = True
-
         else:
             # No tool calls — LLM returned a text response, we're done
             final_msg = {"role": "assistant", "content": response.text}
@@ -1360,7 +1356,7 @@ def _get_startup_memory_context() -> str:
 def cli():
     """Interactive CLI mode — the main entry point for terminal use."""
     from llm import BACKEND
-    from capabilities import TIER_LABEL, MAX_TOOL_TURNS
+    from capabilities import TIER_LABEL, DEPTH
 
     all_tools = get_all_tools()
     builtin_count = len(TOOLS)
@@ -1368,13 +1364,13 @@ def cli():
 
     print("=" * 60)
     print("🐺 Obedient Beast - AI Assistant")
-    print(f"   Backend: {BACKEND}")
-    print(f"   Tier: {TIER_LABEL} (max {MAX_TOOL_TURNS} tool turns)")
+    print(f"   Brain: {TIER_LABEL} ({BACKEND})")
+    print(f"   Depth: {DEPTH} steps per request")
     print(f"   Tools: {builtin_count} built-in" + (f" + {mcp_count} MCP" if mcp_count > 0 else ""))
     if MCP_ENABLED:
         print(f"   MCP: enabled")
     print("=" * 60)
-    print("Commands: /help, /more, /status, /skills, /new, /clear, /quit, /tools, /claude, /openai, /lfm, /model")
+    print("Commands: /help, /more, /status, /depth, /new, /clear, /quit, /tools, /claude, /openai, /lfm, /model")
     print("=" * 60 + "\n")
 
     session_id = f"cli_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
