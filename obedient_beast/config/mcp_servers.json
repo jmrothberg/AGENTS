@@ -10,7 +10,7 @@
     "memory": {
       "enabled": true,
       "command": "npx -y @modelcontextprotocol/server-memory",
-      "description": "Persistent knowledge graph - Beast remembers things forever",
+      "description": "In-process knowledge graph for entity/relationship memory. Stores facts as nodes with typed edges (e.g., 'user prefers dark mode' linked to 'user works on project X'). Richer than flat memory.json — supports semantic search and relationship traversal. NOTE: ephemeral — runs as an npx subprocess and resets when Beast restarts. Persistent facts are saved to workspace/memory.json independently.",
       "local": true,
       "tier": "essential"
     },

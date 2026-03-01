@@ -36,7 +36,7 @@ Data Flow:
    c. Call LLM with history + available tools
    d. If LLM returns tool_calls → execute them → add results → loop back to (c)
    e. If LLM returns text only → save to history → return to user
-4. Auto-save key facts to memory (MCP + local JSON fallback)
+4. Auto-save key facts to memory (local JSON + MCP knowledge graph if running)
 
 Tool Count: 18 built-in + N MCP tools (loaded dynamically)
 
@@ -131,8 +131,8 @@ WORKSPACE = Path(__file__).parent / "workspace"
 SESSIONS_DIR = Path(__file__).parent / "sessions"
 SESSIONS_DIR.mkdir(exist_ok=True)
 
-# Local memory file — JSON fallback when MCP memory server is unavailable.
-# Stores facts as simple {"facts": [{"text": "...", "timestamp": "..."}]}
+# Local memory file — the persistent memory store (see "Memory System" section below).
+# Stores facts as {"facts": [{"text": "...", "timestamp": "..."}]}
 # Capped at 200 entries (FIFO) to prevent unbounded growth.
 MEMORY_FILE = WORKSPACE / "memory.json"
 
@@ -188,13 +188,31 @@ SYSTEM_PROMPT = load_system_prompt()
 
 
 # ---------------------------------------------------------------------------
-# Local Memory Helpers — JSON fallback for when MCP memory is unavailable
+# Memory System — Two-Tier Architecture
 # ---------------------------------------------------------------------------
-# These functions provide a simple local memory store so Beast can remember
-# facts even without the MCP memory server running. Facts are stored in
-# workspace/memory.json as a flat list with timestamps.
-# The MCP memory server (knowledge graph) is richer, but this ensures
-# memory always works, even offline or in Local mode.
+# Beast has two memory stores that work together:
+#
+# 1. LOCAL MEMORY (workspace/memory.json) — PRIMARY, PERSISTENT
+#    Simple flat list of facts with timestamps. Survives restarts.
+#    Capped at 200 entries (FIFO). Keyword search only.
+#    This is the reliable backbone — always works, no dependencies.
+#
+# 2. MCP KNOWLEDGE GRAPH (optional) — RICHER, EPHEMERAL
+#    Provided by @modelcontextprotocol/server-memory (an npx subprocess).
+#    Stores entities as nodes with typed relationships/edges between them.
+#    Example: entity "Jonathan" --[prefers]--> "dark mode"
+#             entity "Jonathan" --[works_on]--> "Obedient Beast"
+#    Supports semantic search and relationship traversal, so the LLM can
+#    ask "what do I know about Jonathan?" and get connected facts back.
+#    WHY IT'S USEFUL: flat memory can only keyword-match individual facts.
+#    The knowledge graph connects facts together, enabling richer recall
+#    (e.g., "what projects does the user work on?" traverses edges).
+#    CAVEAT: ephemeral — the npx subprocess holds state in memory only.
+#    When Beast restarts, the graph is empty. Key facts are independently
+#    saved to local memory (memory.json) so nothing critical is lost.
+#
+# Both stores are written to on every conversation turn (_try_memory_save).
+# /clear memory and /clear all wipe both stores.
 
 def _load_local_memory() -> dict:
     """Load local memory from workspace/memory.json. Returns {"facts": [...]}."""
@@ -241,9 +259,9 @@ def _search_local_memory(query: str) -> str:
 def _try_memory_save(session_id: str, user_input: str, response_text: str):
     """
     Auto-save key facts to memory at end of a conversation turn.
-    Saves to BOTH MCP memory (if available) AND local JSON fallback.
-    This ensures facts persist regardless of MCP state.
-    Respects the capability tier (full vs minimal detail).
+    Saves to BOTH local memory (persistent) AND MCP knowledge graph (if running).
+    Local memory is the durable store; MCP graph adds richer entity/relationship
+    recall during the current session but resets on restart.
     """
     # Always save to local memory fallback (works offline, no MCP needed)
     from capabilities import MEMORY_DETAIL
@@ -942,16 +960,15 @@ def run(user_input: str, session_id: str = "default", llm=None, image_path: str 
         return "🧹 Task queue cleared."
 
     if cmd == "/clear memory":
-        # Clear local memory (workspace/memory.json)
-        cleared = []
-        if MEMORY_FILE.exists():
-            MEMORY_FILE.write_text(json.dumps({"facts": []}, indent=2))
-            cleared.append("local memory")
-        else:
-            cleared.append("local memory (was already empty)")
-        # Note: MCP knowledge graph must be cleared manually via the MCP memory server.
-        # We can't easily wipe it from here, but we tell the user.
-        return "🧹 " + " and ".join(cleared) + " cleared.\n💡 MCP knowledge graph (if enabled) is separate — ask me to 'forget everything in memory' to clear that too."
+        # Clear local memory
+        MEMORY_FILE.write_text(json.dumps({"facts": []}, indent=2))
+        # Also clear MCP knowledge graph if available
+        if MCP_ENABLED and _mcp_client is not None:
+            try:
+                execute_mcp_tool("mcp_memory_delete_all_nodes", {})
+            except Exception:
+                pass
+        return "🧹 Memory cleared."
 
     if cmd == "/clear all":
         # Clear chat history
@@ -967,7 +984,13 @@ def run(user_input: str, session_id: str = "default", llm=None, image_path: str 
         tasks_file.write_text(json.dumps({"tasks": []}, indent=2))
         # Clear local memory
         MEMORY_FILE.write_text(json.dumps({"facts": []}, indent=2))
-        return "🧹 All cleared — chat history, task queue, and local memory.\n💡 MCP knowledge graph (if enabled) is separate — ask me to 'forget everything in memory' to clear that too."
+        # Also clear MCP knowledge graph if available
+        if MCP_ENABLED and _mcp_client is not None:
+            try:
+                execute_mcp_tool("mcp_memory_delete_all_nodes", {})
+            except Exception:
+                pass
+        return "🧹 All cleared — chat history, task queue, and memory."
 
     # --- /tools: list all available tools (built-in + MCP) ---
     if cmd == "/tools":
@@ -1648,15 +1671,41 @@ def cli():
                 print()
                 continue
 
-            # /image <path> — attach an image to the next message
+            # /image [path] — attach an image to the next message
+            # No path: opens a file dialog. With path: uses that file.
             if user_input.lower().startswith("/image"):
                 parts = user_input.split(maxsplit=1)
-                if len(parts) < 2:
-                    print("Usage: /image <path>  — then type your question on the next prompt")
-                    print("Example: /image ~/photo.jpg")
-                    print()
-                    continue
-                img_path = Path(parts[1].strip()).expanduser()
+                if len(parts) >= 2:
+                    # Path provided on command line
+                    img_path = Path(parts[1].strip()).expanduser()
+                else:
+                    # No path — open file picker dialog
+                    try:
+                        import tkinter as tk
+                        from tkinter import filedialog
+                        root = tk.Tk()
+                        root.withdraw()
+                        root.attributes("-topmost", True)
+                        selected = filedialog.askopenfilename(
+                            title="Select an image",
+                            filetypes=[
+                                ("Image files", "*.png *.jpg *.jpeg *.gif *.bmp *.webp *.tiff"),
+                                ("PNG", "*.png"),
+                                ("JPEG", "*.jpg *.jpeg"),
+                                ("All files", "*.*"),
+                            ]
+                        )
+                        root.destroy()
+                        if not selected:
+                            print("(No image selected)")
+                            print()
+                            continue
+                        img_path = Path(selected)
+                    except Exception as e:
+                        print(f"File dialog failed: {e}")
+                        print("Usage: /image <path>")
+                        print()
+                        continue
                 if not img_path.exists():
                     print(f"File not found: {img_path}")
                     print()
