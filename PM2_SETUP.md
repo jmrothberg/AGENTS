@@ -2,7 +2,15 @@
 
 All commands below are ready to copy-paste. Run from any directory.
 
-**IMPORTANT: pm2 runs background services only. To chat with Beast, run beast.py in a terminal:**
+**IMPORTANT: pm2 runs background services only. Two processes must stay as terminal windows:**
+- **beast.py** — interactive CLI (you type, it responds)
+- **lfm_thinking.py** — interactive model picker (choose your model, watch it load)
+
+`start.sh` handles both: it starts the 3 pm2 services and opens terminal windows for lfm_thinking + CLI.
+```bash
+cd /Users/jonathanrothberg/Agents/obedient_beast && ./start.sh
+```
+Or run beast.py directly for CLI only:
 ```bash
 cd /Users/jonathanrothberg/Agents/obedient_beast && /Users/jonathanrothberg/Agents/.venv/bin/python3 beast.py
 ```
@@ -21,34 +29,37 @@ pm2 delete all
 
 ## Start All Services
 
-Copy-paste this whole block to register all 4 background services.
-Then open a terminal and run beast.py for your interactive CLI (see below).
+`start.sh` handles everything — run this instead of copy-pasting:
+```bash
+cd /Users/jonathanrothberg/Agents/obedient_beast && ./start.sh
+```
+
+Or register the 3 background services manually with pm2:
 
 ```bash
-# 1) Local LLM server (Qwen3.5-122B — change model name as needed)
-pm2 start /Users/jonathanrothberg/Agents/lfm_thinking.py \
-    --name lfm-thinking \
-    --interpreter /Users/jonathanrothberg/Agents/.venv/bin/python3 \
-    --cwd /Users/jonathanrothberg/Agents \
-    --max-restarts 3 --restart-delay 10000 \
-    -- --model Qwen3.5-122B --server
-
-# 2) Beast HTTP server (receives WhatsApp messages)
+# 1) Beast HTTP server (receives WhatsApp messages)
 pm2 start /Users/jonathanrothberg/Agents/obedient_beast/server.py \
     --name beast-server \
     --interpreter /Users/jonathanrothberg/Agents/.venv/bin/python3 \
     --cwd /Users/jonathanrothberg/Agents/obedient_beast
 
-# 3) WhatsApp bridge
+# 2) WhatsApp bridge
 pm2 start /Users/jonathanrothberg/Agents/obedient_beast/whatsapp/bridge.js \
     --name whatsapp-bridge \
     --cwd /Users/jonathanrothberg/Agents/obedient_beast/whatsapp
 
-# 4) Heartbeat (autonomous task processor)
+# 3) Heartbeat (autonomous task processor)
 pm2 start /Users/jonathanrothberg/Agents/obedient_beast/heartbeat.py \
     --name beast-heartbeat \
     --interpreter /Users/jonathanrothberg/Agents/.venv/bin/python3 \
     --cwd /Users/jonathanrothberg/Agents/obedient_beast
+```
+
+**lfm_thinking.py is NOT managed by pm2** — run it in a terminal so you can pick the model interactively:
+```bash
+cd /Users/jonathanrothberg/Agents && /Users/jonathanrothberg/Agents/.venv/bin/python3 lfm_thinking.py
+# or via start.sh:
+./start.sh lfm
 ```
 
 ## Save & Enable Auto-Start on Reboot
@@ -64,8 +75,6 @@ pm2 runs everything in the background. To see what's happening, use `pm2 logs`.
 Log files are stored at `~/.pm2/logs/`:
 
 ```
-~/.pm2/logs/lfm-thinking-out.log        # lfm-thinking stdout
-~/.pm2/logs/lfm-thinking-error.log      # lfm-thinking stderr
 ~/.pm2/logs/beast-server-out.log
 ~/.pm2/logs/beast-server-error.log
 ~/.pm2/logs/whatsapp-bridge-out.log
@@ -74,14 +83,15 @@ Log files are stored at `~/.pm2/logs/`:
 ~/.pm2/logs/beast-heartbeat-error.log
 ```
 
+lfm_thinking.py logs are visible directly in its terminal window (not pm2).
+
 Quick commands:
 
 ```bash
-# Live tail ALL services at once (Ctrl-C to stop watching)
+# Live tail ALL pm2 services at once (Ctrl-C to stop watching)
 pm2 logs
 
 # Live tail just one service
-pm2 logs lfm-thinking
 pm2 logs beast-server
 pm2 logs whatsapp-bridge
 pm2 logs beast-heartbeat
@@ -90,7 +100,7 @@ pm2 logs beast-heartbeat
 pm2 logs --err --lines 30 --nostream
 
 # Show last 50 lines of one service (no live tail)
-pm2 logs lfm-thinking --lines 50 --nostream
+pm2 logs beast-server --lines 50 --nostream
 ```
 
 Each log line is prefixed with the service name so you can tell them apart.
@@ -107,27 +117,29 @@ cd /Users/jonathanrothberg/Agents/obedient_beast
 ```
 
 So your typical workflow is:
-1. `pm2 restart all` — starts the 4 background services
-2. Open a terminal, run `beast.py` — your interactive CLI
-3. Now you can chat via CLI AND WhatsApp at the same time
+1. `./start.sh` — starts the 3 pm2 background services + opens terminal windows for lfm_thinking and beast CLI
+2. In the lfm_thinking terminal, pick your model and wait for it to load
+3. Chat via the Beast CLI terminal AND WhatsApp at the same time
 
 ## Day-to-Day Commands
 
 ```bash
-# Check status of everything
+# Check status of everything (pm2 + terminal processes)
+./start.sh status
+
+# pm2 status only
 pm2 status
 
-# Restart everything
+# Restart all pm2 services
 pm2 restart all
 
-# Restart one service
-pm2 restart lfm-thinking
+# Restart one pm2 service
 pm2 restart beast-server
 pm2 restart whatsapp-bridge
 pm2 restart beast-heartbeat
 
-# Stop one service
-pm2 stop lfm-thinking
+# Stop one pm2 service
+pm2 stop beast-server
 
 # Switch local model without restarting
 curl -X POST http://localhost:8000/v1/models/switch \
@@ -139,14 +151,6 @@ curl http://localhost:8000/v1/models/available
 ```
 
 ## Troubleshooting
-
-**lfm-thinking crash loop (61 restarts)?**
-The old config used system `python3` which doesn't have cv2/mlx installed.
-Fix: delete and re-register with the venv interpreter (commands above).
-
-**Large models take a long time to load:**
-`--max-restarts 3 --restart-delay 10000` prevents pm2 from kill-restarting
-during the long model load. If you see restarts climbing, check logs.
 
 **WhatsApp "Try again later":**
 WhatsApp rate-limits device linking. Wait 10-15 minutes and retry.
