@@ -38,7 +38,7 @@ Data Flow:
    e. If LLM returns text only → save to history → return to user
 4. Auto-save key facts to memory (local JSON + MCP knowledge graph if running)
 
-Tool Count: 18 built-in + N MCP tools (loaded dynamically)
+Tool Count: 29 built-in + N MCP tools (loaded dynamically)
 
 Usage:
     python beast.py                     # Interactive CLI mode
@@ -73,7 +73,7 @@ from llm import get_llm, ToolCall
 # tool list, prefixed with "mcp_servername_" to avoid name collisions.
 #
 # If MCP is disabled or a server fails, Beast still works fine with
-# its 18 built-in tools — MCP is purely additive.
+# its 29 built-in tools — MCP is purely additive.
 
 # Default to true — if you have MCP servers configured, they should load.
 # Set MCP_ENABLED=false in .env only if you explicitly want to disable MCP.
@@ -117,7 +117,7 @@ def execute_mcp_tool(name: str, args: dict) -> str:
 
 def get_all_tools() -> list[dict]:
     """
-    Get all available tools: 18 built-in + any MCP tools.
+    Get all available tools: 29 built-in + any MCP tools.
     This is what gets sent to the LLM so it knows what it can call.
     """
     return TOOLS + get_mcp_tools()
@@ -508,7 +508,7 @@ def _try_memory_save(session_id: str, user_input: str, response_text: str):
 
 
 # ---------------------------------------------------------------------------
-# Tools Definition — 18 built-in tools
+# Tools Definition — 29 built-in tools
 # ---------------------------------------------------------------------------
 # Each tool is a dict with name, description, and params.
 # The LLM sees these descriptions and decides which tools to call.
@@ -1612,14 +1612,19 @@ I'm an AI assistant that lives on your computer. You talk to me (here in the ter
   • Change it anytime: `/depth 3` (fewer steps = faster, simpler)
   • Current depth: {DEPTH}
 
-**My 19 Built-in Abilities:**
+**My 29 Built-in Abilities:**
+  Code sandbox — `run_python` (runs scripts, returns output + files)
+                 `run_html` (creates page, opens browser, screenshots for WhatsApp)
   Files — read, write, edit files, list folders
-  Terminal — run any command on your computer
+  Terminal — run any shell command on your computer
   Screen — take screenshots, move the mouse, click, type
-  Memory — I remember things across conversations (BM25 + recency)
+  Browser — persistent Playwright browser (login once, reuse cookies)
+  Memory — remember things across conversations (BM25 + recency)
   Web — fetch web pages and API data
-  Tasks — I keep a to-do list and can work on it by myself
+  Tasks — to-do list with heartbeat autopilot
+  Skills — markdown runbook system (`/skills`)
   Sub-agents — spawn isolated sub-sessions for side quests
+  MCP — self-upgrade by installing new tool servers
 
 **Giving Me Tasks for Later:**
   Just say things naturally:

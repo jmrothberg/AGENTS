@@ -4,7 +4,7 @@ A minimal agentic assistant with tool calling, autonomous task queue, persistent
 
 ## For LLMs landing in this repo (60-second onboarding)
 
-- **Entry point:** `beast.py` → `cli()` (line ~1624). HTTP entry: `server.py`. Heartbeat entry: `heartbeat.py`.
+- **Entry point:** `beast.py` → `cli()`. HTTP entry: `server.py`. Heartbeat entry: `heartbeat.py`.
 - **Agent loop:** `beast.run()` — load history → call LLM → execute tools → repeat up to `DEPTH` turns → save → return text.
 - **Tools live in** `beast.py`: the `TOOLS` list defines schema; `execute_tool()` implements them. To add a tool, append a dict to `TOOLS` *and* add an `elif name == "foo":` branch in `execute_tool()`.
 - **LLM abstraction:** `llm.py` exposes `get_llm(backend)` returning a client with `.chat(history, tools, system)`. Supports `claude`, `openai`, `lfm` (any OpenAI-compatible local server).
@@ -65,16 +65,20 @@ pm2 save   # persist across reboots
 ### Restart after a code change
 
 ```bash
-# Python code changes — restart the pm2 services that load beast.py
+# beast.py / llm.py / server.py / heartbeat.py changed:
 pm2 restart beast-server beast-heartbeat
+# Also Ctrl-C + relaunch beast.py in its terminal
 
-# Interactive processes — just exit and relaunch in their terminal:
-# Ctrl-C in the beast.py terminal, then rerun the Terminal 2 command above.
-# lfm_thinking.py only needs a restart if YOU changed lfm_thinking.py itself.
+# lfm_thinking.py changed (tool parsing, model defaults, prompt format):
+# Ctrl-C in the lfm_thinking terminal, then:
+cd /Users/jonathanrothberg/Agents && \
+  /Users/jonathanrothberg/Agents/.venv/bin/python3 lfm_thinking.py
 
-# WhatsApp bridge — only restart if whatsapp/bridge.js changed
+# WhatsApp bridge — only if whatsapp/bridge.js changed
 pm2 restart whatsapp-bridge
 ```
+
+**Rule of thumb:** if you changed Python files, restart everything that imports them. When in doubt, restart all three: `pm2 restart beast-server beast-heartbeat`, Ctrl-C + relaunch `lfm_thinking.py`, Ctrl-C + relaunch `beast.py`.
 
 ### Day-to-day pm2 commands
 
@@ -111,7 +115,7 @@ Beast can generate a program and immediately run it. Two tools handle the full c
 
 - **Python scripts** run in `workspace/Generated Code/py_<timestamp>/` with Beast's own venv (numpy, matplotlib, etc. available). Timeout: 30s default, 120s max.
 - **HTML pages** are saved to `workspace/Generated Code/html_<timestamp>/`, opened in the default browser, AND auto-screenshotted via Playwright so WhatsApp users see a rendered preview.
-- `/sandbox` lists recent runs with their output files.
+- `/sandbox` lists recent runs with their output files. `/sandbox log` shows the activity log with code snippets + results.
 
 ## Architecture
 
@@ -125,16 +129,18 @@ User (CLI / WhatsApp / HTTP)
    │    │                │
    ▼    ▼                ▼
 llm.py  Built-in Tools   mcp_client.py
-(3 backends)  (19 tools)   (MCP servers)
+(3 backends)  (29 tools)   (MCP servers)
 ```
 
 **Files:**
-- `beast.py` — Agent loop, 18 built-in tools, CLI interface, slash commands
-- `llm.py` — Unified LLM client (Claude, OpenAI, local models)
+- `beast.py` — Agent loop, 29 built-in tools, CLI interface, slash commands
+- `llm.py` — Unified LLM client (Claude, OpenAI, local models) with dual tool-call parsing (native API + text-based with JSON repair)
 - `server.py` — Flask HTTP server for WhatsApp bridge
 - `heartbeat.py` — Autonomous task scheduler (processes task queue on a timer)
 - `mcp_client.py` — MCP server connection manager
 - `capabilities.py` — Cloud vs Local tier settings
+- `browser_tools.py` — Persistent Playwright browser (cookies survive restarts)
+- `skills_loader.py` — Markdown runbook loader for `workspace/skills/`
 - `whatsapp/bridge.js` — WhatsApp connector (Baileys library)
 
 ## Memory System
@@ -178,21 +184,38 @@ Three backends configured via `LLM_BACKEND` in `.env`:
 
 **Fallback chain:** Set `LLM_FALLBACK=claude,openai` in `.env` — if the primary backend fails, Beast automatically tries fallbacks in order.
 
+**Model-specific defaults:** `lfm_thinking.py` auto-detects model families and applies recommended sampling parameters:
+
+| Model family | temperature | top_p | top_k | Detection |
+|---|---|---|---|---|
+| **Gemma 4** | 1.0 | 0.95 | 64 | `"gemma"` in model name |
+| All others | 0.7 | — | — | default |
+
 ## Slash Commands
 
 | Command | Description |
 |---------|-------------|
-| `/help` | Show available commands |
+| `/help` | Short help with capabilities overview |
+| `/more` | Detailed guide with examples for every feature |
 | `/status` | Current backend, model, session info |
 | `/image [path]` | Attach image (opens file dialog if no path) |
 | `/claude`, `/openai`, `/lfm` | Switch LLM backend |
 | `/depth N` | Set max tool-call steps per request |
+| `/model [name]` | List local models or hot-swap to a different one |
+| `/boot` | Run `workspace/BOOT.md` startup routine on demand |
+| `/boot install` | Create BOOT.md from the example template |
+| `/sandbox` | List recent sandbox runs (Python scripts, HTML pages) |
+| `/sandbox log` | Show the sandbox activity log (what ran, what happened) |
+| `/tasks` | Show task queue |
+| `/done N` / `/drop N` | Mark task done / remove task |
+| `/heartbeat on\|off` | Toggle background task processing |
+| `/tools` | List all available tools (built-in + MCP) |
+| `/skills` | Installable MCP plug-in catalog |
 | `/clear` | Clear chat history |
 | `/clear memory` | Clear all memory (local + MCP graph) |
 | `/clear all` | Clear everything (chat + tasks + memory) |
-| `/tasks` | Show task queue |
-| `/tools` | List available tools |
-| `/boot` | Run `workspace/BOOT.md` startup routine on demand |
+| `/new` | Start fresh conversation (CLI only) |
+| `/quit` | Exit (CLI only) |
 
 ## BOOT.md — Your Startup Routine
 
