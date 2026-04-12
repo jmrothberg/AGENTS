@@ -103,6 +103,23 @@ First-time install: `./setup.sh` (installs Python + Node deps). More pm2 detail 
 
 Previous round (already shipped): LLM fallback chain, scheduled/recurring tasks, context trimming with summary, startup memory recall, `/image` vision input.
 
+## Art Generation — `generate_art`
+
+Beast can draw, paint, and generate images from text prompts using FLUX.1-schnell running locally on Apple Silicon (no cloud API). Just ask naturally:
+
+- *"draw a sunset over the ocean"*
+- *"paint a cat in a space helmet"*
+- *"create a watercolor of the Golden Gate Bridge"*
+
+| Scenario | CLI user sees | WhatsApp user sees |
+|---|---|---|
+| `generate_art` → image | file path shown | **image auto-sent** |
+
+- Model: FLUX.1-schnell 4-bit quantized (~5GB, stored at `/Users/jonathanrothberg/mlx-FLUX.1-schnell-4bit-quantized`)
+- Standalone script: `../flux_art.py` (can also be used independently from CLI)
+- Images saved to `../generated_art/`
+- Be descriptive in your prompts — more detail = better results
+
 ## Sandbox — `run_python` and `run_html`
 
 Beast can generate a program and immediately run it. Two tools handle the full cycle: write → execute → return results.
@@ -129,7 +146,7 @@ User (CLI / WhatsApp / HTTP)
    │    │                │
    ▼    ▼                ▼
 llm.py  Built-in Tools   mcp_client.py
-(3 backends)  (29 tools)   (MCP servers)
+(3 backends)  (30 tools)   (MCP servers)
 ```
 
 **Files:**

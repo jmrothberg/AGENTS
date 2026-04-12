@@ -38,7 +38,7 @@ Data Flow:
    e. If LLM returns text only → save to history → return to user
 4. Auto-save key facts to memory (local JSON + MCP knowledge graph if running)
 
-Tool Count: 29 built-in + N MCP tools (loaded dynamically)
+Tool Count: 30 built-in + N MCP tools (loaded dynamically)
 
 Usage:
     python beast.py                     # Interactive CLI mode
@@ -73,7 +73,7 @@ from llm import get_llm, ToolCall
 # tool list, prefixed with "mcp_servername_" to avoid name collisions.
 #
 # If MCP is disabled or a server fails, Beast still works fine with
-# its 29 built-in tools — MCP is purely additive.
+# its 30 built-in tools — MCP is purely additive.
 
 # Default to true — if you have MCP servers configured, they should load.
 # Set MCP_ENABLED=false in .env only if you explicitly want to disable MCP.
@@ -117,7 +117,7 @@ def execute_mcp_tool(name: str, args: dict) -> str:
 
 def get_all_tools() -> list[dict]:
     """
-    Get all available tools: 29 built-in + any MCP tools.
+    Get all available tools: 30 built-in + any MCP tools.
     This is what gets sent to the LLM so it knows what it can call.
     """
     return TOOLS + get_mcp_tools()
@@ -508,7 +508,7 @@ def _try_memory_save(session_id: str, user_input: str, response_text: str):
 
 
 # ---------------------------------------------------------------------------
-# Tools Definition — 29 built-in tools
+# Tools Definition — 30 built-in tools
 # ---------------------------------------------------------------------------
 # Each tool is a dict with name, description, and params.
 # The LLM sees these descriptions and decides which tools to call.
@@ -766,6 +766,19 @@ TOOLS = [
             "html": "The full HTML source (including <html>, <head>, <body>)",
             "filename": "Optional: filename (default: index.html)",
             "open_browser": "Optional: 'false' to skip opening the browser (default: true)"
+        }
+    },
+    # ---------------------------------------------------------------------------
+    # Art Generation — FLUX.1-schnell text-to-image on Apple Silicon
+    # ---------------------------------------------------------------------------
+    {
+        "name": "generate_art",
+        "description": "Generate an image from a text prompt using FLUX.1-schnell AI art model running locally on Apple Silicon. Use when the user asks to draw, paint, create art, generate an image, or make a picture. Returns the file path of the generated PNG. Image is auto-sent via WhatsApp.",
+        "params": {
+            "prompt": "Text description of the image to generate (be detailed and descriptive)",
+            "width": "Optional: image width in pixels (default 512)",
+            "height": "Optional: image height in pixels (default 512)",
+            "seed": "Optional: random seed for reproducibility"
         }
     },
 ]
@@ -1276,6 +1289,39 @@ def execute_tool(name: str, args: dict) -> str:
             _sandbox_log("run_html", str(sandbox_dir), html, final_result)
             return final_result
 
+        # === Art Generation (FLUX.1-schnell) ===
+        elif name == "generate_art":
+            prompt = args.get("prompt", "").strip()
+            if not prompt:
+                return "Error: generate_art requires a 'prompt' parameter"
+            try:
+                width = int(args.get("width", 512))
+                height = int(args.get("height", 512))
+            except (TypeError, ValueError):
+                width, height = 512, 512
+            seed = args.get("seed")
+            if seed is not None:
+                try:
+                    seed = int(seed)
+                except (TypeError, ValueError):
+                    seed = None
+
+            # Import from flux_art.py in the parent directory
+            sys.path.insert(0, str(Path(__file__).parent.parent))
+            try:
+                from flux_art import generate_image
+                filepath = generate_image(
+                    prompt=prompt,
+                    width=width,
+                    height=height,
+                    seed=seed,
+                )
+                # Queue image for WhatsApp delivery
+                set_pending_image(filepath)
+                return f"Art generated and saved to {filepath}\n(Image queued for WhatsApp delivery)"
+            except Exception as e:
+                return f"Error generating art: {e}"
+
         # === MCP Tools ===
         # Any tool name starting with "mcp_" is routed to the MCP client.
         # The naming convention is: mcp_<servername>_<toolname>
@@ -1542,6 +1588,7 @@ Just talk to me like a person. I can:
 • Remember things for later ("remind me to call the dentist")
 • Search the web (when connected to Brave Search)
 • Fetch data from websites and APIs
+• **Draw art** — "draw a sunset", "paint a cat in space" → AI image generation (FLUX.1-schnell, runs locally)
 • **Run code in a sandbox** — I write it, run it, you see results:
   `run_python` → text output + images sent to you automatically
   `run_html` → page opens in browser + screenshot sent via WhatsApp
@@ -1612,7 +1659,7 @@ I'm an AI assistant that lives on your computer. You talk to me (here in the ter
   • Change it anytime: `/depth 3` (fewer steps = faster, simpler)
   • Current depth: {DEPTH}
 
-**My 29 Built-in Abilities:**
+**My 30 Built-in Abilities:**
   Code sandbox — `run_python` (runs scripts, returns output + files)
                  `run_html` (creates page, opens browser, screenshots for WhatsApp)
   Files — read, write, edit files, list folders
@@ -1674,6 +1721,19 @@ I'm an AI assistant that lives on your computer. You talk to me (here in the ter
   Set `LLM_FALLBACK=claude,openai` in .env — if my primary backend
   errors out mid-request, I retry with the next one using a
   text-only history so there are no format mismatches.
+
+**🎨 Art Generation (FLUX.1-schnell):**
+  Ask me to draw, paint, or create any image. I use a local AI art
+  model running on Apple Silicon — no cloud API needed.
+
+  Examples:
+  • "draw a sunset over the ocean with a sailboat"
+  • "paint a cat wearing a space helmet floating in zero gravity"
+  • "create a watercolor of the San Francisco skyline"
+  • "generate art of a fractal tree in neon colors"
+
+  Images are saved to `generated_art/` and auto-sent via WhatsApp.
+  Tip: be descriptive — more detail = better results.
 
 **📦 Sandbox — Run Generated Code:**
   Ask me to write and run code. I handle the full cycle:

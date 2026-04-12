@@ -422,7 +422,7 @@ def run_server_mode(model, tokenizer, processor, model_name, model_type, host="0
         # Priority tools — these appear first and get full descriptions.
         # run_python and run_html MUST be here or the model won't use them.
         priority_names = [
-            "run_python", "run_html",
+            "generate_art", "run_python", "run_html",
             "shell", "read_file", "write_file", "edit_file", "list_dir",
             "screenshot", "add_task", "recall_memory", "fetch_url",
             "browser_goto", "browser_read",
@@ -470,6 +470,7 @@ def run_server_mode(model, tokenizer, processor, model_name, model_type, host="0
                 lines.append(f"  ...and {len(other_names) - 20} more")
         lines.append("\nRULES:")
         lines.append("- You MUST call a tool when the user asks you to do something. Never just describe what you would do.")
+        lines.append("- For drawing/art/images: ALWAYS use generate_art. Put a detailed description in the 'prompt' argument.")
         lines.append("- For Python code: ALWAYS use run_python. Put the code in the 'code' argument. NEVER output ```python blocks — the user cannot run those.")
         lines.append("- For HTML/JS: ALWAYS use run_html. Put the HTML in the 'html' argument. NEVER use write_file.")
         lines.append("- Output ONLY the ```tool_call block. No explanation before or after.")

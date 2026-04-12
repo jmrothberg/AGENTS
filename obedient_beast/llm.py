@@ -270,6 +270,7 @@ class LLM:
                 "{\"name\": \"tool_name\", \"arguments\": {\"param\": \"value\"}}\n"
                 "```\n"
                 "CRITICAL RULES:\n"
+                "- For drawing/art/images: use generate_art (put a description in the 'prompt' argument).\n"
                 "- For Python code: use run_python (put code in the 'code' argument). NEVER output ```python blocks.\n"
                 "- For HTML pages: use run_html (put HTML in the 'html' argument). NEVER use write_file.\n"
                 "- ALWAYS use a tool when asked to do something. Never just describe what you would do.\n"
