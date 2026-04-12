@@ -105,7 +105,7 @@ Previous round (already shipped): LLM fallback chain, scheduled/recurring tasks,
 
 ## Art Generation — `generate_art`
 
-Beast can draw, paint, and generate images from text prompts using FLUX.1-schnell running locally on Apple Silicon (no cloud API). Just ask naturally:
+Beast can draw, paint, and generate images from text prompts using FLUX.2-klein-4B running locally on Apple Silicon (no cloud API). Just ask naturally:
 
 - *"draw a sunset over the ocean"*
 - *"paint a cat in a space helmet"*
@@ -115,7 +115,7 @@ Beast can draw, paint, and generate images from text prompts using FLUX.1-schnel
 |---|---|---|
 | `generate_art` → image | file path shown | **image auto-sent** |
 
-- Model: FLUX.1-schnell 4-bit quantized (~5GB, stored at `/Users/jonathanrothberg/mlx-FLUX.1-schnell-4bit-quantized`)
+- Model: `RunPod/FLUX.2-klein-4B-mflux-4bit` (auto-downloaded by mflux on first use)
 - Standalone script: `../flux_art.py` (can also be used independently from CLI)
 - Images saved to `../generated_art/`
 - Be descriptive in your prompts — more detail = better results

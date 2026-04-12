@@ -42,7 +42,7 @@ You have **30 built-in tools**:
 - use_skill - Load and follow a skill's step-by-step instructions
 
 **Art Generation:**
-- generate_art - Generate an image from a text prompt using FLUX.1-schnell AI art model. ALWAYS use this when asked to draw, paint, create art, or make an image. Auto-sends via WhatsApp.
+- generate_art - Generate an image from a text prompt using FLUX.2-klein-4B AI art model. ALWAYS use this when asked to draw, paint, create art, or make an image. Auto-sends via WhatsApp.
 
 **Sub-Agents:**
 - spawn_agent - Run a subtask in an isolated session

@@ -769,11 +769,11 @@ TOOLS = [
         }
     },
     # ---------------------------------------------------------------------------
-    # Art Generation — FLUX.1-schnell text-to-image on Apple Silicon
+    # Art Generation — FLUX.2-klein-4B text-to-image on Apple Silicon
     # ---------------------------------------------------------------------------
     {
         "name": "generate_art",
-        "description": "Generate an image from a text prompt using FLUX.1-schnell AI art model running locally on Apple Silicon. Use when the user asks to draw, paint, create art, generate an image, or make a picture. Returns the file path of the generated PNG. Image is auto-sent via WhatsApp.",
+        "description": "Generate an image from a text prompt using FLUX.2-klein-4B AI art model running locally on Apple Silicon. Use when the user asks to draw, paint, create art, generate an image, or make a picture. Returns the file path of the generated PNG. Image is auto-sent via WhatsApp.",
         "params": {
             "prompt": "Text description of the image to generate (be detailed and descriptive)",
             "width": "Optional: image width in pixels (default 512)",
@@ -1289,7 +1289,7 @@ def execute_tool(name: str, args: dict) -> str:
             _sandbox_log("run_html", str(sandbox_dir), html, final_result)
             return final_result
 
-        # === Art Generation (FLUX.1-schnell) ===
+        # === Art Generation (FLUX.2-klein-4B) ===
         elif name == "generate_art":
             prompt = args.get("prompt", "").strip()
             if not prompt:
@@ -1588,7 +1588,7 @@ Just talk to me like a person. I can:
 • Remember things for later ("remind me to call the dentist")
 • Search the web (when connected to Brave Search)
 • Fetch data from websites and APIs
-• **Draw art** — "draw a sunset", "paint a cat in space" → AI image generation (FLUX.1-schnell, runs locally)
+• **Draw art** — "draw a sunset", "paint a cat in space" → AI image generation (FLUX.2-klein-4B, runs locally)
 • **Run code in a sandbox** — I write it, run it, you see results:
   `run_python` → text output + images sent to you automatically
   `run_html` → page opens in browser + screenshot sent via WhatsApp
@@ -1722,7 +1722,7 @@ I'm an AI assistant that lives on your computer. You talk to me (here in the ter
   errors out mid-request, I retry with the next one using a
   text-only history so there are no format mismatches.
 
-**🎨 Art Generation (FLUX.1-schnell):**
+**🎨 Art Generation (FLUX.2-klein-4B):**
   Ask me to draw, paint, or create any image. I use a local AI art
   model running on Apple Silicon — no cloud API needed.
 
