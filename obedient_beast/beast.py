@@ -2228,8 +2228,14 @@ I'm an AI assistant that lives on your computer. You talk to me (here in the ter
             # Execute each tool and collect results
             tool_results = []
             for tool_call in response.tool_calls:
-                print(f"  [Tool: {tool_call.name}({tool_call.args})]", file=sys.stderr)
+                # Log to both stderr (CLI) and stdout (pm2 logs)
+                args_preview = str(tool_call.args)[:200]
+                print(f"  🔧 [{tool_call.name}] {args_preview}", file=sys.stderr)
+                print(f"  🔧 [{tool_call.name}] {args_preview}")
                 result = execute_tool(tool_call.name, tool_call.args)
+                result_preview = str(result)[:200].replace('\n', ' ')
+                print(f"  ✅ [{tool_call.name}] → {result_preview}", file=sys.stderr)
+                print(f"  ✅ [{tool_call.name}] → {result_preview}")
                 tool_results.append((tool_call, result))
 
             # --- Loop detection: bail if the agent is spinning ---

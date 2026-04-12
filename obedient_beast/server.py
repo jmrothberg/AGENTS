@@ -153,7 +153,10 @@ def message():
     elif not is_allowed(sender, chat_id):
         return jsonify({"error": "Not authorized"}), 403
 
-    print(f"[{sender}] {text[:100]}...")
+    print(f"\n{'='*50}")
+    print(f"[{sender}] {text[:200]}")
+    if image_path:
+        print(f"[Attached image] {image_path}")
 
     # Use sender phone number as session ID for conversation continuity.
     # This means each WhatsApp contact has their own persistent conversation.
@@ -161,7 +164,8 @@ def message():
 
     try:
         response = run(text, session_id, llm, image_path=image_path)
-        print(f"[Response] {response[:100]}...")
+        # Show which tools were used (parse from stderr output of beast.run)
+        print(f"[Response] ({len(response)} chars) {response[:200]}...")
 
         # Check if Beast generated an image (e.g., screenshot tool was used).
         # If so, include the path in the response for bridge.js to send.

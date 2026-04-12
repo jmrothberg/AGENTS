@@ -438,71 +438,98 @@ def run_server_mode(model, tokenizer, processor, model_name, model_type, host="0
         return tool_text
 
     def parse_tool_calls(text):
-        """Parse tool calls from model output."""
+        """
+        Parse tool calls from model output using brace-depth matching.
+
+        Regex with .*? or [^}]+ CANNOT handle nested braces inside JSON
+        string values (e.g. HTML content with } characters). We use
+        brace-depth matching that tracks string escaping to reliably
+        extract the full JSON blob regardless of content.
+        """
         tool_calls = []
-        
-        # Pattern 1: ```tool_call\n{...}\n``` - use greedy match for nested braces
-        pattern1 = r'```tool_call\s*\n?\s*(\{.*?\})\s*\n?```'
-        matches = re.findall(pattern1, text, re.DOTALL)
-        
-        # Pattern 1b: ```tool\n{...}\n``` - GLM Flash uses this shorter variant
-        pattern1b = r'```tool\s*\n?\s*(\{.*?\})\s*\n?```'
-        matches += re.findall(pattern1b, text, re.DOTALL)
-        
-        # Pattern 2: <tool_call>{...}</tool_call> (Qwen3 native format)
-        pattern2 = r'<tool_call>\s*(\{.*?\})\s*</tool_call>'
-        matches += re.findall(pattern2, text, re.DOTALL)
-        
-        # Pattern 3: Extract JSON between ```tool_call and ``` more robustly
-        pattern3 = r'```tool_call\s*\n([\s\S]*?)\n```'
-        block_matches = re.findall(pattern3, text)
-        
-        # Pattern 3b: Also match ```tool variant for GLM Flash
-        pattern3b = r'```tool\s*\n([\s\S]*?)\n```'
-        block_matches += re.findall(pattern3b, text)
-        
-        # Try to parse all matches, deduplicate by name+args
-        all_candidates = matches + block_matches
-        seen = set()
-        
-        def add_tool_call(data):
-            """Add tool call if not duplicate."""
+
+        def _extract_json(s, start=0):
+            """Extract the first balanced {...} from s at/after 'start'."""
+            idx = s.find('{', start)
+            if idx < 0:
+                return None, -1
+            depth = 0
+            in_str = False
+            escape = False
+            for i in range(idx, len(s)):
+                c = s[i]
+                if escape:
+                    escape = False
+                    continue
+                if c == '\\':
+                    escape = True
+                    continue
+                if c == '"' and not escape:
+                    in_str = not in_str
+                    continue
+                if in_str:
+                    continue
+                if c == '{':
+                    depth += 1
+                elif c == '}':
+                    depth -= 1
+                    if depth == 0:
+                        return s[idx:i + 1], i + 1
+            return None, -1
+
+        def try_add(data):
+            """Add tool call if it has a name and isn't a duplicate."""
             name = data.get("name")
-            args = json.dumps(data.get("arguments", data.get("args", {})))
-            key = f"{name}:{args}"
+            if not name:
+                return
+            args = data.get("arguments", data.get("args", {}))
+            if isinstance(args, str):
+                try:
+                    args = json.loads(args)
+                except:
+                    args = {}
+            args_str = json.dumps(args)
+            key = f"{name}:{args_str}"
             if key not in seen:
                 seen.add(key)
                 tool_calls.append({
                     "id": f"call_{uuid.uuid4().hex[:8]}",
                     "type": "function",
-                    "function": {"name": name, "arguments": args}
+                    "function": {"name": name, "arguments": args_str}
                 })
-        
-        for match in all_candidates:
-            match = match.strip()
-            try:
-                data = json.loads(match)
-                if "name" in data:
-                    add_tool_call(data)
-            except json.JSONDecodeError:
-                # Try to extract JSON with brace matching
+
+        seen = set()
+
+        # Pattern A: ```tool_call or ```tool fenced blocks
+        for m in re.finditer(r'```tool(?:_call)?\s*\n', text):
+            blob, _ = _extract_json(text, m.end())
+            if blob:
                 try:
-                    start = match.find('{')
-                    if start >= 0:
-                        depth = 0
-                        for i, c in enumerate(match[start:]):
-                            if c == '{':
-                                depth += 1
-                            elif c == '}':
-                                depth -= 1
-                                if depth == 0:
-                                    data = json.loads(match[start:start+i+1])
-                                    if "name" in data:
-                                        add_tool_call(data)
-                                    break
-                except:
+                    data = json.loads(blob)
+                    try_add(data)
+                except json.JSONDecodeError:
                     pass
-        
+
+        # Pattern B: <tool_call>{...}</tool_call> (Qwen3)
+        for m in re.finditer(r'<tool_call>\s*', text):
+            blob, _ = _extract_json(text, m.end())
+            if blob:
+                try:
+                    data = json.loads(blob)
+                    try_add(data)
+                except json.JSONDecodeError:
+                    pass
+
+        # Pattern C: Raw JSON with "name" key (last resort)
+        if not tool_calls:
+            blob, _ = _extract_json(text)
+            if blob and '"name"' in blob:
+                try:
+                    data = json.loads(blob)
+                    try_add(data)
+                except json.JSONDecodeError:
+                    pass
+
         # Only return first tool call to prevent loops
         return tool_calls[:1]
 

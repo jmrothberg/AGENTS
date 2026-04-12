@@ -344,44 +344,98 @@ class LLM:
                 ))
         else:
             # Strategy 2: Parse text-based tool calls from model output.
-            # Pattern A: Fenced code blocks — ```tool\n{...}\n```
-            # This is the format we asked for in the tool_prompt above.
-            tool_pattern = r'```tool\s*\n?\s*(\{[^}]+\})\s*\n?```'
-            matches = re.findall(tool_pattern, text, re.DOTALL)
+            # Models output tool calls in various formats:
+            #   ```tool\n{...}\n```          (what we asked for)
+            #   ```tool_call\n{...}\n```     (common variant)
+            #   <tool_call>{...}</tool_call> (Qwen3 native)
+            #   raw JSON with "name" key     (fallback)
+            #
+            # Regex with [^}]+ or .*? CANNOT handle nested braces
+            # (e.g. {"name":"write_file","arguments":{"content":"{...}"}})
+            # so we use brace-depth matching for reliable extraction.
 
-            if not matches:
-                # Pattern B: Raw inline JSON — {"name": "...", "args": {...}}
-                # Some models output tool calls without the fenced block wrapper.
-                json_pattern = r'\{"name":\s*"(\w+)",\s*"args":\s*(\{[^}]*\})\}'
-                json_matches = re.findall(json_pattern, text)
-                for name, args_str in json_matches:
-                    try:
-                        args = json.loads(args_str)
-                        tool_calls.append(ToolCall(
-                            id=f"call_{uuid.uuid4().hex[:8]}",
-                            name=name,
-                            args=args
-                        ))
-                    except json.JSONDecodeError:
-                        pass
-            else:
-                # Parse fenced tool blocks
-                for match in matches:
-                    try:
-                        tool_data = json.loads(match)
-                        tool_calls.append(ToolCall(
-                            id=f"call_{uuid.uuid4().hex[:8]}",
-                            name=tool_data["name"],
-                            args=tool_data.get("args", {})
-                        ))
-                    except json.JSONDecodeError:
-                        pass
+            def _extract_json_brace_match(s: str, start: int = 0) -> str | None:
+                """Extract the first balanced {...} from s starting at position start."""
+                idx = s.find('{', start)
+                if idx < 0:
+                    return None
+                depth = 0
+                in_str = False
+                escape = False
+                for i in range(idx, len(s)):
+                    c = s[i]
+                    if escape:
+                        escape = False
+                        continue
+                    if c == '\\':
+                        escape = True
+                        continue
+                    if c == '"' and not escape:
+                        in_str = not in_str
+                        continue
+                    if in_str:
+                        continue
+                    if c == '{':
+                        depth += 1
+                    elif c == '}':
+                        depth -= 1
+                        if depth == 0:
+                            return s[idx:i + 1]
+                return None
 
-            # Clean tool call JSON from the text response so the user
+            def _parse_tool_json(json_str: str) -> ToolCall | None:
+                """Parse a tool call JSON blob into a ToolCall."""
+                try:
+                    data = json.loads(json_str)
+                    if "name" not in data:
+                        return None
+                    # Models use "args" or "arguments" — accept both
+                    args = data.get("args", data.get("arguments", {}))
+                    if isinstance(args, str):
+                        args = json.loads(args)
+                    return ToolCall(
+                        id=f"call_{uuid.uuid4().hex[:8]}",
+                        name=data["name"],
+                        args=args
+                    )
+                except (json.JSONDecodeError, TypeError, KeyError):
+                    return None
+
+            # Pattern A: Fenced code blocks — ```tool or ```tool_call
+            fence_pattern = r'```tool(?:_call)?\s*\n'
+            for m in re.finditer(fence_pattern, text):
+                blob = _extract_json_brace_match(text, m.end())
+                if blob:
+                    tc = _parse_tool_json(blob)
+                    if tc:
+                        tool_calls.append(tc)
+
+            # Pattern B: <tool_call>{...}</tool_call> (Qwen3)
+            if not tool_calls:
+                for m in re.finditer(r'<tool_call>\s*', text):
+                    blob = _extract_json_brace_match(text, m.end())
+                    if blob:
+                        tc = _parse_tool_json(blob)
+                        if tc:
+                            tool_calls.append(tc)
+
+            # Pattern C: Raw JSON with "name" key (last resort)
+            if not tool_calls:
+                blob = _extract_json_brace_match(text)
+                if blob and '"name"' in blob:
+                    tc = _parse_tool_json(blob)
+                    if tc:
+                        tool_calls.append(tc)
+
+            # Clean tool call blocks from the text response so the user
             # only sees the natural language part, not the raw JSON.
             if tool_calls:
-                text = re.sub(tool_pattern, '', text)
-                text = re.sub(r'\{"name":\s*"\w+",\s*"args":\s*\{[^}]*\}\}', '', text)
+                text = re.sub(r'```tool(?:_call)?\s*\n[\s\S]*?\n```', '', text)
+                text = re.sub(r'<tool_call>[\s\S]*?</tool_call>', '', text)
+                # Remove any remaining raw JSON that looks like a tool call
+                blob = _extract_json_brace_match(text)
+                if blob and '"name"' in blob:
+                    text = text.replace(blob, '')
                 text = text.strip()
 
         return LLMResponse(text=text, tool_calls=tool_calls, raw=result)
