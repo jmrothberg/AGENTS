@@ -27,8 +27,7 @@ from datetime import datetime
 # Configuration
 # ---------------------------------------------------------------------------
 OUTPUT_DIR = Path(__file__).parent / "generated_art"
-MODEL = "RunPod/FLUX.2-klein-4B-mflux-4bit"
-BASE_MODEL = "flux2-klein-4b"
+MODEL_HF = "RunPod/FLUX.2-klein-4B-mflux-4bit"  # auto-downloaded on first use
 DEFAULT_WIDTH = 1024
 DEFAULT_HEIGHT = 1024
 DEFAULT_STEPS = 4
@@ -50,10 +49,13 @@ def load_model():
     print("Loading FLUX.2-klein-4B model...")
     start = time.time()
 
-    from mflux import Flux2
-    _flux = Flux2(
-        model=MODEL,
-        base_model=BASE_MODEL,
+    from mflux.models.flux2.variants.txt2img.flux2_klein import Flux2Klein
+    from mflux.models.common.config.model_config import ModelConfig
+
+    _flux = Flux2Klein(
+        quantize=4,
+        model_path=MODEL_HF,
+        model_config=ModelConfig.flux2_klein_4b(),
     )
 
     print(f"  Loaded in {time.time() - start:.1f}s")
@@ -92,11 +94,11 @@ def generate_image(
 
     start = time.time()
     image = flux.generate_image(
+        seed=seed,
         prompt=prompt,
+        num_inference_steps=steps,
         width=width,
         height=height,
-        num_inference_steps=steps,
-        seed=seed,
     )
     elapsed = time.time() - start
 
