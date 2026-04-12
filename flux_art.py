@@ -42,6 +42,7 @@ from datetime import datetime
 # Configuration
 # ---------------------------------------------------------------------------
 OUTPUT_DIR = Path(__file__).parent / "generated_art"
+MODEL_PATH = "/Users/jonathanrothberg/mlx-FLUX.1-schnell-4bit-quantized"
 DEFAULT_WIDTH = 512
 DEFAULT_HEIGHT = 512
 DEFAULT_STEPS = 4        # FLUX.1-schnell is optimized for 4 steps
@@ -59,18 +60,24 @@ def _slugify(text: str, max_len: int = 40) -> str:
     return slug[:max_len]
 
 
-def load_model(quantize: int = DEFAULT_QUANTIZE):
+def load_model(quantize: int = DEFAULT_QUANTIZE, model_path: str = MODEL_PATH):
     """
-    Load the FLUX.1-schnell model (downloads on first run).
+    Load the FLUX.1-schnell model from a local directory.
     Returns the Flux1 model instance. Cached globally for reuse.
     """
     global _model
     if _model is not None:
         return _model
 
+    if not Path(model_path).exists():
+        print(f"ERROR: Model not found at {model_path}")
+        print("Download it with:")
+        print(f"  huggingface-cli download argmaxinc/mlx-FLUX.1-schnell-4bit-quantized --local-dir {model_path}")
+        sys.exit(1)
+
     print("Loading FLUX.1-schnell model...")
+    print(f"  Path: {model_path}")
     print(f"  Quantization: {quantize}-bit")
-    print("  (First run downloads ~5GB — subsequent runs load from cache)")
     start = time.time()
 
     from mflux.models.flux.variants.txt2img.flux import Flux1
@@ -78,6 +85,7 @@ def load_model(quantize: int = DEFAULT_QUANTIZE):
 
     _model = Flux1(
         quantize=quantize,
+        model_path=model_path,
         model_config=ModelConfig.schnell(),
     )
 
