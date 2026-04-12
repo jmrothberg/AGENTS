@@ -409,33 +409,68 @@ def run_server_mode(model, tokenizer, processor, model_name, model_type, host="0
     
     def format_tools_for_prompt(tools):
         """
-        Format tools into a CONCISE prompt section for the model.
-        
-        We keep the tool list short to avoid overwhelming the model's context.
-        Priority tools are listed first for better attention.
+        Format tools into a clear prompt for the model.
+
+        Priority tools are listed FIRST so the model sees them.
+        run_python and run_html are highlighted as the PREFERRED tools
+        for code generation — the model must understand to use them
+        instead of shell/write_file.
         """
         if not tools:
             return ""
-        
-        # Keep only the most useful tools to avoid overwhelming the model
-        priority_tools = [
-            "screenshot", "shell", "read_file", "write_file", "edit_file", "list_dir",
-            "mouse_click", "keyboard_type", "mcp_brave-search_brave_web_search"
+
+        # Priority tools — these appear first and get full descriptions.
+        # run_python and run_html MUST be here or the model won't use them.
+        priority_names = [
+            "run_python", "run_html",
+            "shell", "read_file", "write_file", "edit_file", "list_dir",
+            "screenshot", "add_task", "recall_memory", "fetch_url",
+            "browser_goto", "browser_read",
+            "spawn_agent", "list_skills", "use_skill",
         ]
-        
-        tool_list = []
+
+        # Build: priority tools with params, then a short list of the rest
+        priority_lines = []
+        other_names = []
+        seen = set()
+
+        for pname in priority_names:
+            for tool in tools:
+                func = tool.get("function", tool)
+                name = func.get("name", "unknown")
+                if name == pname and name not in seen:
+                    seen.add(name)
+                    desc = func.get("description", "")[:80]
+                    params = func.get("parameters", {}).get("properties", {})
+                    param_names = ", ".join(params.keys())
+                    priority_lines.append(f"- {name}({param_names}): {desc}")
+
         for tool in tools:
             func = tool.get("function", tool)
             name = func.get("name", "unknown")
-            # Include priority tools first, then limit others
-            if name in priority_tools or len(tool_list) < 15:
-                desc = func.get("description", "")[:50]
-                params = func.get("parameters", {}).get("properties", {})
-                param_names = ", ".join(params.keys())
-                tool_list.append(f"- {name}({param_names}): {desc}")
-        
-        tool_text = "TOOLS: " + " | ".join([t.split(":")[0].strip("- ") for t in tool_list[:10]])
-        return tool_text
+            if name not in seen:
+                other_names.append(name)
+                seen.add(name)
+
+        lines = [
+            "## Available Tools",
+            "Call a tool by outputting JSON in this format:",
+            '```tool_call',
+            '{"name": "tool_name", "arguments": {"param": "value"}}',
+            '```',
+            "",
+            "**IMPORTANT: For Python code use run_python. For HTML pages use run_html. Do NOT use shell or write_file for code.**",
+            "",
+            "**Primary tools:**",
+        ]
+        lines.extend(priority_lines)
+        if other_names:
+            lines.append(f"\n**Other tools ({len(other_names)}):** " + ", ".join(other_names[:20]))
+            if len(other_names) > 20:
+                lines.append(f"  ...and {len(other_names) - 20} more")
+        lines.append("\nYou MUST call a tool when the user asks you to do something. Never just describe what you would do — actually do it.")
+
+        return "\n".join(lines)
 
     def parse_tool_calls(text):
         """
@@ -854,7 +889,7 @@ def run_server_mode(model, tokenizer, processor, model_name, model_type, host="0
             tools_prompt = format_tools_for_prompt(request.tools) if request.tools else ""
             print(f"[DEBUG] Tools received: {len(request.tools) if request.tools else 0}")
             if tools_prompt:
-                print(f"[DEBUG] Tools prompt added ({len(tools_prompt)} chars)")
+                print(f"[DEBUG] Tools prompt ({len(tools_prompt)} chars):\n{tools_prompt[:500]}")
                 # Put tool instruction AFTER user request for better attention
                 tool_instruction = (
                     f"\n\n{tools_prompt}\n"
