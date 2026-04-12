@@ -1224,11 +1224,26 @@ def execute_tool(name: str, args: dict) -> str:
             if open_browser:
                 import webbrowser
                 webbrowser.open(file_url)
-            return (
-                f"HTML page saved to {filepath}\n"
-                f"URL: {file_url}\n"
-                f"{'Opened in default browser.' if open_browser else 'Browser not opened (open_browser=false).'}"
-            )
+            result_lines = [
+                f"HTML page saved to {filepath}",
+                f"URL: {file_url}",
+                "Opened in default browser." if open_browser else "Browser not opened (open_browser=false).",
+            ]
+            # Auto-screenshot for WhatsApp: render the page in the persistent
+            # browser, take a screenshot, and queue it so WhatsApp users can
+            # actually see the HTML page on their phone.
+            try:
+                from browser_tools import browser_goto, browser_screenshot, BrowserUnavailable
+                browser_goto(file_url)
+                import time; time.sleep(1)  # let JS/CSS render
+                screenshot_name = f"html_{ts}.png"
+                shot_path = browser_screenshot(screenshot_name)
+                set_pending_image(shot_path)
+                result_lines.append(f"Screenshot captured and queued for WhatsApp ({screenshot_name}).")
+            except Exception as e:
+                # Browser not available — no screenshot, still works
+                result_lines.append(f"(No screenshot — browser not available: {e})")
+            return "\n".join(result_lines)
 
         # === MCP Tools ===
         # Any tool name starting with "mcp_" is routed to the MCP client.
@@ -1496,7 +1511,9 @@ Just talk to me like a person. I can:
 • Remember things for later ("remind me to call the dentist")
 • Search the web (when connected to Brave Search)
 • Fetch data from websites and APIs
-• Write and run Python scripts or HTML/JS pages in a sandbox
+• **Run code in a sandbox** — I write it, run it, you see results:
+  `run_python` → text output + images sent to you automatically
+  `run_html` → page opens in browser + screenshot sent via WhatsApp
 • Work on tasks by myself in the background
 
 **Two brain modes:**
@@ -1626,19 +1643,26 @@ I'm an AI assistant that lives on your computer. You talk to me (here in the ter
   Ask me to write and run code. I handle the full cycle:
   write → execute → return results.
 
-  **Python:** "Write a Python script that calculates pi to 100 digits"
-    → I use `run_python` to create a sandbox dir, run the script,
-      and show you stdout. If the script creates a plot (.png),
-      I queue it for WhatsApp delivery automatically.
+  **What you see (CLI vs WhatsApp):**
+    Scenario                      | Beast sees? | WhatsApp user sees?
+    run_python → text output      | ✅ stdout   | ✅ pasted in reply
+    run_python → creates .png     | ✅ file list | ✅ image auto-sent
+    run_html → HTML page          | ✅ file path | ✅ auto-screenshot sent
+    run_html → on CLI             | ✅ file path | ✅ opens in browser
 
-  **HTML/JS:** "Create a bouncing ball animation" or "make a tic-tac-toe game"
-    → I use `run_html` to write the HTML and open it in your browser.
-      The file stays in `workspace/sandbox/` so you can revisit it.
+  **Python:** "Write a script that plots a sine wave"
+    → `run_python` creates sandbox/py_<ts>/, runs the script,
+      returns stdout. If a .png is created, it's auto-sent to WhatsApp.
+
+  **HTML/JS:** "Make a tic-tac-toe game" or "bouncing ball animation"
+    → `run_html` writes to sandbox/html_<ts>/, opens in browser,
+      AND auto-screenshots the page so WhatsApp users see it too.
 
   **Tips:**
     • `/sandbox` — list recent runs with their output files
     • Scripts run with Beast's Python, so installed packages work
-    • HTML pages open in your default browser automatically
+    • HTML pages open in your default browser AND get screenshotted
+    • All sandbox files persist in `workspace/sandbox/`
 
 **Using Me in Shared Group Chats:**
   I normally stay quiet in group chats with other people.

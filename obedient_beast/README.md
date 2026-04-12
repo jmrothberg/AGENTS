@@ -99,6 +99,20 @@ First-time install: `./setup.sh` (installs Python + Node deps). More pm2 detail 
 
 Previous round (already shipped): LLM fallback chain, scheduled/recurring tasks, context trimming with summary, startup memory recall, `/image` vision input.
 
+## Sandbox — `run_python` and `run_html`
+
+Beast can generate a program and immediately run it. Two tools handle the full cycle: write → execute → return results.
+
+| Scenario | Beast sees? | CLI user sees? | WhatsApp user sees? |
+|---|---|---|---|
+| `run_python` → text output | ✅ stdout/stderr | ✅ printed in reply | ✅ sent in message |
+| `run_python` → creates `.png` plot | ✅ file listed | ✅ file path shown | ✅ **image auto-sent** |
+| `run_html` → HTML page | ✅ file path | ✅ opens in browser | ✅ **auto-screenshot sent** |
+
+- **Python scripts** run in `workspace/sandbox/py_<timestamp>/` with Beast's own venv (numpy, matplotlib, etc. available). Timeout: 30s default, 120s max.
+- **HTML pages** are saved to `workspace/sandbox/html_<timestamp>/`, opened in the default browser, AND auto-screenshotted via Playwright so WhatsApp users see a rendered preview.
+- `/sandbox` lists recent runs with their output files.
+
 ## Architecture
 
 ```
