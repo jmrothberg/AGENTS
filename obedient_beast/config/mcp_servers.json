@@ -58,6 +58,22 @@
       "local": true,
       "tier": "extended"
     },
+    "apple-calendar": {
+      "enabled": true,
+      "command": "npx -y mcp-server-apple-events",
+      "description": "Read/write macOS Calendar events and Reminders via Apple EventKit (self-contained Swift bridge)",
+      "local": true,
+      "tier": "essential"
+    },
+    "apple-mail": {
+      "enabled": true,
+      "command": "npx -y apple-mail-mcp",
+      "description": "Read and search macOS Mail.app emails (read-only — send/compose tools blocked)",
+      "local": true,
+      "tier": "extended",
+      "blocked_tools": ["send", "compose", "create_draft", "reply", "forward", "move", "delete", "trash"],
+      "note": "Read-only mode. Remove entries from blocked_tools to enable write actions (add guardrails in beast.py first)."
+    },
     "brave-search": {
       "enabled": true,
       "command": "npx -y @modelcontextprotocol/server-brave-search",

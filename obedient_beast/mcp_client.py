@@ -83,6 +83,7 @@ class MCPServer:
     request_id: int = 0                                # Auto-incrementing JSON-RPC request ID
     response_queue: queue.Queue = field(default_factory=queue.Queue)  # Responses from reader thread
     reader_thread: Optional[threading.Thread] = None   # Background thread reading stdout
+    blocked_tools: list[str] = field(default_factory=list)  # Tool names to exclude (substring match)
 
 
 class MCPClient:
@@ -169,7 +170,8 @@ class MCPClient:
             bufsize=1  # Line-buffered for JSON-RPC (one JSON object per line)
         )
 
-        server = MCPServer(name=name, command=command, process=process)
+        blocked_tools = config.get("blocked_tools", [])
+        server = MCPServer(name=name, command=command, process=process, blocked_tools=blocked_tools)
 
         # Start a dedicated reader thread for this server.
         # The thread reads JSON-RPC responses from stdout and puts them on
@@ -224,7 +226,7 @@ class MCPClient:
         # Wait for the matching response from the reader thread (with timeout).
         # MCP servers may send notifications (no "id" field) — skip those.
         # We match on request_id to ensure we get the right response.
-        timeout = 30
+        timeout = 60  # 60s to allow first-run compilation (e.g., Swift bridge)
         import time
         deadline = time.time() + timeout
         while True:
@@ -275,9 +277,14 @@ class MCPClient:
         server.tools = []
 
         for tool_data in response.get("result", {}).get("tools", []):
+            tool_name = tool_data["name"]
+            # Filter out blocked tools (substring match against blocked_tools list)
+            if server.blocked_tools and any(b in tool_name.lower() for b in [bt.lower() for bt in server.blocked_tools]):
+                print(f"[MCP] Blocked tool: {server_name}/{tool_name}")
+                continue
             tool = MCPTool(
                 server=server_name,
-                name=tool_data["name"],
+                name=tool_name,
                 description=tool_data.get("description", ""),
                 input_schema=tool_data.get("inputSchema", {})
             )
@@ -321,6 +328,12 @@ class MCPClient:
         Call a tool on an MCP server and return the result as text.
         Sends "tools/call" JSON-RPC request and parses the content response.
         """
+        # Defense-in-depth: block tool calls even if they bypassed discovery filtering
+        server = self.servers.get(server_name)
+        if server and server.blocked_tools:
+            if any(bt.lower() in tool_name.lower() for bt in server.blocked_tools):
+                return f"Error: Tool '{tool_name}' is blocked for server '{server_name}'. Modify blocked_tools in mcp_servers.json to allow it."
+
         response = self._send_request(server_name, "tools/call", {
             "name": tool_name,
             "arguments": arguments

@@ -128,15 +128,37 @@ def get_pending_tasks(data: dict) -> list:
 def _reset_recurring_task(task: dict):
     """
     Reset a recurring task for its next run.
-    Sets status back to pending and computes next_run_at.
+
+    Supports two recurrence modes (cron wins if both are set):
+    - `cron` (string, 5-field): uses cron_schedule.next_run to compute the
+      next fire time matching the expression. This mirrors OpenClaw's cron
+      tool and lets users say things like "every weekday at 9am" with a
+      single expression.
+    - `repeat_seconds` (int): simple interval recurrence, e.g. every 3600s.
+
+    After rescheduling, status is reset to "pending" and `last_run_at` is
+    stamped so the task queue can show recent activity.
     """
+    cron_expr = task.get("cron")
     interval = task.get("repeat_seconds")
-    if not interval:
+    if not cron_expr and not interval:
         return
     task["status"] = "pending"
     task["last_run_at"] = datetime.now().isoformat()
-    next_run = datetime.now().timestamp() + int(interval)
-    task["next_run_at"] = datetime.fromtimestamp(next_run).isoformat()
+    if cron_expr:
+        try:
+            from cron_schedule import next_run as _cron_next_run
+            task["next_run_at"] = _cron_next_run(cron_expr).isoformat()
+            return
+        except Exception as exc:
+            print(
+                f"[Heartbeat] Bad cron {cron_expr!r} on task #{task.get('id')}: {exc}. "
+                "Falling back to repeat_seconds if set.",
+                file=sys.stderr,
+            )
+    if interval:
+        next_ts = datetime.now().timestamp() + int(interval)
+        task["next_run_at"] = datetime.fromtimestamp(next_ts).isoformat()
 
 
 def _write_notification(task: dict, result: str):
@@ -173,7 +195,9 @@ def process_task(task: dict, llm) -> str:
     """
     task_id = task.get("id", "?")
     description = task.get("description", "No description")
-    is_recurring = bool(task.get("repeat_seconds"))
+    # A task is recurring if it has EITHER a cron expression or a repeat
+    # interval. Both paths flow through _reset_recurring_task().
+    is_recurring = bool(task.get("repeat_seconds") or task.get("cron"))
 
     # Build a prompt that tells Beast this is an autonomous task
     if is_recurring:
@@ -205,7 +229,11 @@ def process_task(task: dict, llm) -> str:
                 if t.get("id") == task_id:
                     _reset_recurring_task(t)
             save_tasks(data)
-            print(f"[Heartbeat] Recurring task #{task_id} rescheduled (every {task.get('repeat_seconds')}s)")
+            recurrence = (
+                f"cron {task.get('cron')!r}" if task.get("cron")
+                else f"every {task.get('repeat_seconds')}s"
+            )
+            print(f"[Heartbeat] Recurring task #{task_id} rescheduled ({recurrence})")
         _write_notification(task, response)
         return response
     except Exception as e:

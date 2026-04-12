@@ -1,953 +1,278 @@
-# Local LLM Inference Tools + Obedient Beast Agent
+# Agents Monorepo — Local LLM Servers + Obedient Beast
 
-**Written by Jonathan M Rothberg**
+**Author:** Jonathan M Rothberg
 
-> **Looking for the agent?** See [`obedient_beast/README.md`](obedient_beast/README.md) — that's a minimal, single-file agentic assistant with 19 built-in tools, autonomous task queue, persistent memory, WhatsApp/CLI/HTTP interfaces, and a runtime-extensible MCP plug-in system. This top-level README documents the **local LLM inference servers** that the agent can talk to.
+Two projects in one repo, designed to work together:
 
-Local inference scripts that **dynamically discover and serve any model** in your model directories. Supports both:
-- **macOS** (Apple Silicon) using MLX for optimized inference
-- **Ubuntu/Linux** (NVIDIA GPUs) using transformers/PyTorch
+1. **Local LLM servers** (`lfm_thinking.py` for macOS/MLX, `linux_thinking.py` for Linux/transformers) — dynamically discover any model on disk and serve it as an OpenAI-compatible API.
+2. **Obedient Beast** (`obedient_beast/`) — a small, powerful personal AI agent with CLI, WhatsApp, and HTTP front-ends, tool calling, autonomous task scheduling, persistent memory, a skills registry, and persistent browser control.
 
-> **Note on naming:** The filename `lfm_thinking.py` and the `LFM_URL` env var are legacy names from when this project started with LiquidAI's LFM-2.5 models. The scripts now support **any compatible model** — just drop model folders into your models directory and they appear in the selection menu automatically. The "LFM" naming is kept for backward compatibility with existing configs.
-
-## Features
-
-- **Dynamic Model Discovery**: Scans your model directories at startup — any model folder with a `config.json` is detected and offered in the selection menu
-- **Automatic Type Detection**: Detects text vs. vision models from `config.json` (looks for "vl"/"vision"/"image" in `model_type`) or the presence of `processor_config.json`
-- **Interactive Mode**: Chat directly in the terminal
-- **Server Mode**: OpenAI-compatible API server accessible on your local network
-- **Streaming**: Real-time token streaming (macOS/MLX text models)
-- **Vision**: Image and video analysis (VL models)
-- **TTS**: Optional text-to-speech for responses
-
-## How Model Selection Works
-
-Both scripts scan their respective model directories at startup:
-
-| Platform | Script | Framework | Model Directory |
-|----------|--------|-----------|-----------------|
-| macOS | `lfm_thinking.py` | MLX | `/Users/jonathanrothberg/MLX_Models/` |
-| Linux | `linux_thinking.py` | transformers/PyTorch | Configurable via `MODEL_SEARCH_PATHS` (default: `/home/jonathan/Models_Transformer/`) |
-
-**To add a new model:** Download or copy the model folder into the appropriate directory. Next time you run the script, it appears in the numbered menu. No code changes needed.
-
-The scripts detect model type automatically:
-- **Text models**: Default. Used for chat, reasoning, tool calling.
-- **Vision models**: Detected when `config.json` contains "vl", "vision", or "image" in `model_type`, or when `processor_config.json` exists. Enables image/video analysis.
-
-## Scripts
-
-### `lfm_thinking.py`
-macOS (MLX) — Interactive chat OR OpenAI-compatible server. Scans `MLX_Models/` directory for all available models. (Legacy name — works with any MLX model, not just LFM.)
-
-### `linux_thinking.py`
-Linux (transformers/CUDA) — Interactive chat OR OpenAI-compatible server. Scans `MODEL_SEARCH_PATHS` directories for all available models. Drop-in replacement for `lfm_thinking.py` on Linux.
-
-### `test_client.py`
-Streaming test client for the server mode.
-
-## Usage
-
-```bash
-# Interactive (model selection menu)
-python lfm_thinking.py
-
-# Headless / pm2 (no interactive prompts)
-python lfm_thinking.py --model latest --server          # Serve the most recently downloaded model
-python lfm_thinking.py --model Qwen3.5 --server         # Serve model matching "Qwen3.5"
-python lfm_thinking.py --model GLM --server --port 9000  # Custom port
-python lfm_thinking.py --list                            # List available models and exit
-
-# Linux (NVIDIA GPU)
-python linux_thinking.py
-```
-
-| Flag | Description |
-|------|-------------|
-| `--model NAME` | Skip model menu. Use `latest` for most recent, or a name/substring to match |
-| `--server` | Start in server mode automatically (no interactive prompt) |
-| `--port PORT` | Server port (default: 8000) |
-| `--list` | List available models with dates and exit |
-
-### Step 1: Select Model
-The script scans your model directories and presents a numbered menu of all available models. For example:
-```
-==================================================
-Model Selection
-==================================================
-  1. LFM2.5-1.2B-Thinking (Text)
-  2. LFM2.5-VL-1.6B (Vision-Language) [VL]
-  3. GLM-4.7-Flash (Text)
-  4. MiniMax-M2.1-REAP-50 (Text)
-==================================================
-Select model (1/2/3/4):
-```
-Your list will differ based on which models you have downloaded.
-
-### Step 2: Select Mode
-- **1** = Interactive chat (local terminal)
-- **2** = Server mode (OpenAI-compatible API)
-
-### Media Options (VL Model, Interactive Mode)
-- `i` = Image (opens file dialog)
-- `v` = Video analysis
-- `n` = Text only
+The LLM servers are optional — Beast also talks to Claude and OpenAI out of the box. But running both together gives you a fully local, self-hosted assistant.
 
 ---
 
-## Server Mode (OpenAI-Compatible API)
+## Table of contents
 
-Run the model as an API server accessible from any device on your local network.
-
-### Starting the Server
-
-```bash
-python lfm_thinking.py        # macOS
-python linux_thinking.py       # Linux
-# Select a model from the numbered menu
-# Select mode 2 (Server)
-# Accept default port 8000 or enter custom
-```
-
-The server will display:
-```
-🚀 OpenAI-Compatible Server Starting
-============================================================
-Model: LFM2.5-1.2B-Thinking
-Type:  text
-============================================================
-Access URLs:
-  Local:   http://localhost:8000
-  Network: http://192.168.x.x:8000
-============================================================
-```
-
-### API Endpoints
-
-| Endpoint | Method | Description |
-|----------|--------|-------------|
-| `/` | GET | Health check (shows current model) |
-| `/v1/models` | GET | Currently loaded model (OpenAI format) |
-| `/v1/models/available` | GET | All models in the models directory |
-| `/v1/models/switch` | POST | Hot-swap model: `{"model": "latest"}` or `{"model": "Qwen3"}` |
-| `/v1/chat/completions` | POST | Chat completions (OpenAI format) |
-
-### Example: curl
-
-```bash
-curl http://192.168.x.x:8000/v1/chat/completions \
-  -H "Content-Type: application/json" \
-  -d '{"model": "LFM2.5-1.2B-Thinking", "messages": [{"role": "user", "content": "Hello!"}]}'
-```
-
-### Example: Python OpenAI Client
-
-```python
-from openai import OpenAI
-
-client = OpenAI(base_url="http://192.168.x.x:8000/v1", api_key="not-needed")
-response = client.chat.completions.create(
-    model="LFM2.5-1.2B-Thinking",
-    messages=[{"role": "user", "content": "Hello!"}]
-)
-print(response.choices[0].message.content)
-```
-
-### Example: Streaming with Python
-
-```python
-from openai import OpenAI
-
-client = OpenAI(base_url="http://192.168.x.x:8000/v1", api_key="not-needed")
-stream = client.chat.completions.create(
-    model="LFM2.5-1.2B-Thinking",
-    messages=[{"role": "user", "content": "Write a poem"}],
-    stream=True
-)
-for chunk in stream:
-    if chunk.choices[0].delta.content:
-        print(chunk.choices[0].delta.content, end="", flush=True)
-```
-
-### Test Client
-
-Use the included test client for interactive streaming chat:
-
-```bash
-python test_client.py              # localhost:8000
-python test_client.py 192.168.x.x  # custom host
-python test_client.py 192.168.x.x 8080  # custom host and port
-```
-
-Type `quit` to exit.
-
-### Platform Support
-
-| Feature | macOS (MLX) | Linux (Transformers) |
-|---------|-------------|---------------------|
-| Interactive Mode | ✅ | ✅ |
-| Server Mode | ✅ | ✅ |
-| Streaming | ✅ (token-by-token) | ✅ (single-chunk SSE) |
-
-**Note**: macOS/MLX streams tokens in real-time. Linux/transformers generates the full response first and sends it as a single SSE chunk (compatible with all OpenAI clients).
+1. [Quick start](#quick-start)
+2. [Repo layout](#repo-layout)
+3. [Local LLM servers](#local-llm-servers)
+4. [Obedient Beast](#obedient-beast)
+5. [Adding a skill](#adding-a-skill)
+6. [Scheduling work with cron](#scheduling-work-with-cron)
+7. [Persistent browser control](#persistent-browser-control)
+8. [Environment variables](#environment-variables)
+9. [For LLMs reading this repo](#for-llms-reading-this-repo)
+10. [Troubleshooting](#troubleshooting)
 
 ---
 
-## Video Analysis
-
-### How It Works
-
-1. Select a video file via file dialog
-2. Choose sampling interval (default: 2 seconds)
-3. Script extracts frames at the specified interval
-4. Each frame is sent to the VL model with your prompt
-5. Descriptions are printed with timestamps
-6. Option to save results to a timestamped text file
-
-### Supported Video Formats
-
-OpenCV (cv2) handles video decoding. Supported formats depend on your system's codecs:
-
-| Format | Extension | Notes |
-|--------|-----------|-------|
-| MP4 | `.mp4` | H.264/H.265 codec, most common |
-| AVI | `.avi` | Legacy format, widely supported |
-| MOV | `.mov` | QuickTime format |
-| MKV | `.mkv` | Matroska container |
-| WebM | `.webm` | VP8/VP9 codec |
-
-### Frame Sampling
-
-The script does **not** process every frame. Instead:
-
-- Calculates `frame_interval = FPS × interval_seconds`
-- Reads frames sequentially but only analyzes every Nth frame
-- Example: 30 FPS video with 2s interval = analyze every 60th frame
-
-This allows fast processing of long videos while capturing scene changes.
-
-### Save Output
-
-After video analysis, type `y` when prompted to save results:
-
-```
-Save results? (y/n): y
-Saved to: drone_test_analysis_20260201_143052.txt
-```
-
-Output filename format: `{video_name}_analysis_{YYYYMMDD_HHMMSS}.txt`
-
-## Requirements
+## Quick start
 
 ```bash
+# 1. Clone and install
+git clone <this repo>
+cd Agents
+python3 -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
-```
+pip install -r obedient_beast/requirements.txt
 
-### Core Dependencies (All Platforms)
-- `pillow` - Image processing
-- `opencv-python` - Video processing
-- `pyttsx3` - Text-to-speech (optional)
+# 2. (Optional) Start a local LLM server — macOS
+python lfm_thinking.py --model latest --server
 
-### Server Mode Dependencies
-- `fastapi` - Web framework for API server
-- `uvicorn` - ASGI server
-- `pydantic` - Data validation
+# 3. Configure Beast — pick a brain
+cp obedient_beast/.env.example obedient_beast/.env
+# Edit .env: set LLM_BACKEND=claude|openai|lfm and your API keys.
 
-### macOS (Apple Silicon)
-- `mlx-lm` - MLX Language Models (text)
-- `mlx-vlm` - MLX Vision Language Models
-- `torchvision` - Required by mlx_vlm processor
-
-### Ubuntu/Linux
-- `transformers` (5.0+)
-- `torch` (with CUDA support)
-- `accelerate` (model loading)
-
-## Hardware
-
-### macOS (Apple Silicon)
-Tested on Mac Studio with M-series chips. Uses MLX framework for optimized inference on Apple Neural Engine.
-
-### Ubuntu/Linux (NVIDIA GPUs)
-Tested on NVIDIA Blackwell GPUs (DGX Spark). The scripts include Blackwell-specific optimizations:
-- `CUDA_DEVICE_MAX_CONNECTIONS=1`
-- `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True`
-
-## Local Model Directories
-
-Models are discovered automatically from these directories. Drop any compatible model folder in and it appears in the menu.
-
-### macOS
-```
-/Users/jonathanrothberg/MLX_Models/
-```
-Each subfolder (e.g., `LFM2.5-VL-1.6B-MLX-8bit/`, `GLM-4.7-Flash/`) is one model.
-
-### Ubuntu/Linux
-```
-/home/jonathan/Models_Transformer/
-```
-Each subfolder (e.g., `LFM2.5-1.2B-Thinking/`, `Qwen3-32B/`) is one model. Additional search paths can be added by editing `MODEL_SEARCH_PATHS` at the top of `linux_thinking.py`.
-
----
-
-# Obedient Beast - Personal AI Agent
-
-**An AI assistant that lives on your computer and does things for you.**
-
-Think of Beast like a smart intern sitting at your computer. You tell it what you want (by typing in the terminal or sending a WhatsApp message), and it figures out how to do it — reading files, running commands, taking screenshots, searching the web, whatever is needed.
-
-### What can it do?
-
-- **Use your computer** — run terminal commands, read/write/edit files, take screenshots, control the mouse and keyboard
-- **Remember things** — it has persistent memory across conversations ("remember that my server IP is 10.0.1.5")
-- **Work on its own** — give it tasks for later ("remind me to check disk space") and it works on them automatically in the background
-- **Talk via WhatsApp** — message it from your phone anytime, anywhere
-- **Learn new skills** — plug in MCP servers to add abilities like web search, GitHub access, browser automation, and more
-- **Switch brains on the fly** — use a powerful cloud AI (Claude/OpenAI) for complex work, or a local model running on your own machine for privacy
-
-### Two Brain Modes
-
-Beast has two modes. You pick which AI "brain" it uses:
-
-| | **Cloud** (Claude or OpenAI) | **Local** (model on your machine) |
-|---|---|---|
-| **Best for** | Complex tasks, research, multi-step work | Quick tasks, total privacy |
-| **Default depth** | 10 steps per request | 5 steps per request |
-| **Privacy** | Messages go to cloud AI | Everything stays on your machine |
-| **Cost** | Uses API credits | Free (your hardware does the work) |
-| **MCP skills** | All loaded | All loaded (same) |
-| **Switch to it** | `/claude` or `/openai` | `/lfm` |
-
-"**Depth**" is how many tool-call steps Beast can chain together per request (e.g., search → fetch page → summarize = 3 steps). Change it anytime with `/depth 3`. Strong local models like Qwen3.5-122B handle multi-step chains well.
-
-You can switch between modes anytime, even mid-conversation. Your local model server (`lfm_thinking.py` or `linux_thinking.py`) must be running for Local mode to work.
-
----
-
-## How the Pieces Fit Together
-
-There are 5 programs. Here is what each one does:
-
-| Program | Language | What It Does | Required? |
-|---------|----------|-------------|-----------|
-| `linux_thinking.py` or `lfm_thinking.py` | Python | Scans model dirs and serves any local model as an OpenAI-compatible API on port 8000 | **Yes** (when using local LLM) |
-| `beast.py` | Python | The agent itself. CLI chat, tools, memory, MCP | **Yes** |
-| `server.py` | Python | HTTP API that receives WhatsApp messages and passes them to Beast | Only for WhatsApp |
-| `node whatsapp/bridge.js` | Node.js | Connects to your WhatsApp account via Baileys | Only for WhatsApp |
-| `heartbeat.py` | Python | Wakes up on a timer and works on queued tasks automatically | Optional |
-
-### Data Flow
-
-```
-                         ┌─────────────┐
-YOU (terminal) ─────────►│             │      Cloud brain        ┌──────────────┐
-                         │  beast.py   │─────(/claude /openai)──►│ Claude/OpenAI│
-YOU (WhatsApp) ──bridge──►  agent loop  │                        │   (API)      │
-     .js──►server.py────►│             │      Local brain        ├──────────────┤
-                         │  depth: N   │─────(/lfm)────────────►│lfm_thinking  │
-                         │  tool steps │                        │  (port 8000) │
-                         └─────────────┘                        └──────────────┘
-```
-
-The LLM server (`lfm_thinking.py` on macOS, `linux_thinking.py` on Linux) is **always separate** — start it in its own terminal or via pm2 with `--model Qwen3.5-122B --server`.
-
-If you use Cloud brain (Claude/OpenAI), you do NOT need the LLM server — Beast talks directly to the cloud API.
-
----
-
-## Quick Start
-
-### CLI Only (simplest -- no WhatsApp, no Node.js)
-
-Open **2 terminals**:
-
-```bash
-# Terminal 1: Start LLM server (skip if using Claude/OpenAI)
-cd ~/AGENTS
-python linux_thinking.py
-
-# Terminal 2: Start Beast agent
-cd ~/AGENTS/obedient_beast
-python beast.py
-```
-
-That's it. You're chatting with your local AI agent.
-
-### CLI + WhatsApp (full setup)
-
-Open **4 terminals**:
-
-```bash
-# Terminal 1: Start LLM server (skip if using Claude/OpenAI)
-cd ~/AGENTS
-python linux_thinking.py
-
-# Terminal 2: Start HTTP server (receives WhatsApp messages)
-cd ~/AGENTS/obedient_beast
-python server.py
-
-# Terminal 3: Start WhatsApp bridge (requires Node.js)
-cd ~/AGENTS/obedient_beast/whatsapp
-node bridge.js
-
-# Terminal 4: Start Beast CLI (optional -- you can also just use WhatsApp)
-cd ~/AGENTS/obedient_beast
-python beast.py
-```
-
-First time: the WhatsApp bridge prints a QR code. Scan it with your phone (WhatsApp > Settings > Linked Devices).
-
-### Using `./start.sh` (convenience script)
-
-`./start.sh` opens terminals 2-4 automatically (server, bridge, heartbeat, CLI). You still need to start the LLM server yourself in a separate terminal first.
-
-```bash
-# Terminal 1: Start LLM server manually
-cd ~/AGENTS
-python linux_thinking.py
-
-# Then in obedient_beast/:
-cd ~/AGENTS/obedient_beast
-./start.sh          # Opens 4 windows: server.py, bridge.js, heartbeat.py, beast.py
-./start.sh stop     # Stop all 4
-./start.sh status   # Check what's running
-./start.sh cli      # Start just the CLI (no WhatsApp)
-```
-
-### Using pm2 (recommended — auto-restart & survive reboots)
-
-pm2 keeps the 3 background daemons running permanently. They auto-restart on crash and auto-start on Mac reboot. Much more reliable than leaving terminal windows open.
-
-```bash
-# One-time setup
-sudo npm install -g pm2
-
-# Start the 3 daemons (use your venv python for the Python processes)
-pm2 start ~/AGENTS/obedient_beast/server.py \
-    --name beast-server \
-    --interpreter ~/AGENTS/.venv/bin/python3 \
-    --cwd ~/AGENTS/obedient_beast
-
-pm2 start ~/AGENTS/obedient_beast/whatsapp/bridge.js \
-    --name whatsapp-bridge \
-    --cwd ~/AGENTS/obedient_beast/whatsapp
-
-pm2 start ~/AGENTS/obedient_beast/heartbeat.py \
-    --name beast-heartbeat \
-    --interpreter ~/AGENTS/.venv/bin/python3 \
-    --cwd ~/AGENTS/obedient_beast
-
-# Save process list & enable auto-start on reboot
-pm2 save
-pm2 startup    # Follow the sudo command it prints
-```
-
-**Useful pm2 commands:**
-
-| Command | What it does |
-|---------|-------------|
-| `pm2 status` | See all processes |
-| `pm2 logs` | Tail all logs live |
-| `pm2 logs beast-server` | Logs for one process |
-| `pm2 restart all` | Restart everything |
-| `pm2 restart whatsapp-bridge` | Restart one process |
-| `pm2 stop whatsapp-bridge` | Stop one process |
-
-**Note:** `beast.py` (the CLI) is interactive and cannot run under pm2. `lfm_thinking.py` can now run under pm2 using the `--model` and `--server` flags:
-
-```bash
-# Add the local model server to pm2
-pm2 start ~/AGENTS/lfm_thinking.py \
-    --name lfm-thinking \
-    --interpreter ~/AGENTS/.venv/bin/python3 \
-    --cwd ~/AGENTS \
-    --max-restarts 3 --restart-delay 10000 \
-    -- --model Qwen3.5-122B --server
-```
-
-> **Why `--max-restarts 3` and `--restart-delay 10000`?** Large models (122B+ params) take a long time to load. Without these flags, pm2 kills the process mid-load and restarts it in an infinite crash loop.
-
-**Switch the model without restarting** (while the server is running):
-```bash
-# Via the API
-curl -X POST http://localhost:8000/v1/models/switch \
-    -H "Content-Type: application/json" \
-    -d '{"model": "GLM"}'
-
-# See all available models
-curl http://localhost:8000/v1/models/available
-```
-
-**WhatsApp bridge disconnects:** If the bridge is not running for ~14 days, WhatsApp unlinks the device. Running the bridge under pm2 prevents this since it stays connected 24/7 and auto-reconnects on temporary disconnects.
-
----
-
-## What Requires Node.js?
-
-**Only the WhatsApp bridge** (`node whatsapp/bridge.js`) and **MCP external tools** (`npx` commands) require Node.js.
-
-### What is Node.js?
-
-Node.js is a **JavaScript runtime** — it runs JavaScript code outside of web browsers, similar to how `python` runs Python code:
-
-| Command | What it does |
-|---------|--------------|
-| `python beast.py` | Runs the Python file `beast.py` |
-| `node bridge.js` | Runs the JavaScript file `bridge.js` |
-
-**Why JavaScript for WhatsApp?** The best WhatsApp Web libraries (like Baileys) are written in JavaScript. Rather than rewrite them in Python, we use Node.js to run the existing JavaScript library and have it forward messages to the Python server.
-
-**The bridge is simple:** It connects to WhatsApp, receives your messages, sends them to `server.py` via HTTP, and relays the AI response back to WhatsApp.
-
-Everything else is pure Python:
-- `linux_thinking.py` / `lfm_thinking.py` -- Python
-- `beast.py` -- Python
-- `server.py` -- Python (Flask)
-- `heartbeat.py` -- Python
-
-Install Node.js only if you want WhatsApp or MCP tools:
-```bash
-# Ubuntu/Debian
-sudo apt install nodejs npm
-
-# macOS
-brew install node
-```
-
----
-
-## Setup
-
-```bash
+# 4. Talk to Beast
 cd obedient_beast
-./setup.sh              # Full setup (Python + Node.js)
-./setup.sh --no-node    # Python only (skip WhatsApp/MCP)
+python beast.py                 # CLI
+./start.sh                      # full stack: HTTP server + WhatsApp + heartbeat + CLI
 ```
 
-The setup script creates a Python virtual environment, installs dependencies, and creates a `.env` template.
+That's it. Beast starts with 24 built-in tools, an auto-generated tools manifest in its system prompt, and whatever skills you drop into `workspace/skills/`.
 
 ---
 
-## Architecture
+## Repo layout
 
 ```
-                    ┌──────────────────────┐
-                    │    User Interface     │
-                    │  (CLI or WhatsApp)    │
-                    └──────────┬───────────┘
-                               │
-                    ┌──────────▼───────────┐
-                    │     beast.run()       │  ◄── Agent loop: LLM ↔ Tools
-                    │  (beast.py)           │
-                    └──────────┬───────────┘
-                               │
-              ┌────────────────┼────────────────┐
-              │                │                │
-    ┌─────────▼──────┐ ┌──────▼──────┐ ┌───────▼────────┐
-    │   llm.py       │ │ Built-in    │ │  mcp_client.py │
-    │  (3 backends)  │ │ Tools (18)  │ │  (MCP servers) │
-    │ Claude/OpenAI/ │ │             │ │  with 3-tier   │
-    │ Local (lfm)    │ │             │ │  filtering     │
-    └────────────────┘ └──────┬──────┘ └───────┬────────┘
-                              │                │
-              ┌───────────────┼───────┐  ┌─────┴──────────────┐
-              │               │       │  │  MCP Tier System    │
-         ┌────┴───┐  ┌───────┴──┐    │  │                     │
-         │File &  │  │Computer │    │  │ Essential: fs,mem   │
-         │System  │  │Control  │    │  │ Extended: git,sql   │
-         │+ Net   │  │         │    │  │ Cloud: brave,github │
-         └────────┘  └────────-┘    │  └─────────────────────┘
-         • shell     • screenshot   │
-         • read_file • mouse_click  │  ┌─────────────────────┐
-         • write_file• mouse_move   │  │   Memory System     │
-         • edit_file • keyboard_*   │  │                     │
-         • list_dir  • screen_info  │  │ MCP knowledge graph │
-         • fetch_url                │  │ + local JSON backup │
-         • add_task                 │  │ (workspace/memory)  │
-         • recall_memory            │  └─────────────────────┘
-         • install/list/enable_mcp  │
-                                    │
-                        ┌───────────┴──────────┐
-                        │  capabilities.py     │
-                        │  Cloud vs Local      │
-                        │  + /depth control    │
-                        └──────────────────────┘
+Agents/
+├── README.md                 ← you are here
+├── lfm_thinking.py           ← macOS/MLX local LLM server
+├── linux_thinking.py         ← Linux/transformers local LLM server
+├── test_client.py            ← streaming test client for the servers
+├── requirements.txt          ← top-level (server) Python deps
+└── obedient_beast/           ← the agent
+    ├── beast.py              ← agent loop, built-in tools, slash commands
+    ├── llm.py                ← unified client for Claude / OpenAI / local
+    ├── server.py             ← Flask HTTP bridge (for WhatsApp)
+    ├── heartbeat.py          ← autonomous task scheduler (interval + cron)
+    ├── mcp_client.py         ← MCP server connection manager
+    ├── capabilities.py       ← FULL vs LITE tier settings
+    ├── skills_loader.py      ← SKILL.md runbook registry
+    ├── cron_schedule.py      ← zero-dependency 5-field cron parser
+    ├── browser_tools.py      ← Playwright persistent-profile browser
+    ├── config/mcp_servers.json  ← MCP server catalog
+    ├── workspace/
+    │   ├── SOUL.md           ← personality + capabilities prompt
+    │   ├── AGENTS.md         ← standing goals + reasoning templates
+    │   ├── skills/           ← drop SKILL.md runbooks here
+    │   ├── browser_profile/  ← Playwright cookies/logins (created on first use)
+    │   ├── tasks.json        ← task queue state
+    │   └── memory.json       ← persistent local facts (capped at 200)
+    └── whatsapp/bridge.js    ← WhatsApp connector (Baileys)
 ```
 
-## Files (inside `obedient_beast/`)
+---
 
-| File | Lines | Description |
-|------|-------|-------------|
-| `beast.py` | ~1270 | Agent loop + 18 built-in tools + CLI + slash commands + local memory |
-| `llm.py` | ~405 | Unified LLM client (Claude/OpenAI/local with dual tool-calling) |
-| `server.py` | ~173 | Flask HTTP server -- **only needed for WhatsApp** |
-| `capabilities.py` | ~109 | Cloud vs Local settings, depth control, MCP tier filtering |
-| `heartbeat.py` | ~263 | Autonomous task scheduler (processes task queue on a timer) |
-| `mcp_client.py` | ~420 | MCP server connection manager with tier filtering |
-| `config/mcp_servers.json` | ~95 | MCP server catalog with 11 servers across 3 tiers |
-| `whatsapp/bridge.js` | ~269 | Baileys WhatsApp connector -- **requires Node.js** |
-| `workspace/SOUL.md` | ~72 | Agent personality + MCP tier awareness + self-upgrade awareness |
-| `workspace/AGENTS.md` | ~57 | Task guidance, reasoning templates, memory recall guidelines |
-| `workspace/memory.json` | auto | Local memory fallback (JSON, auto-created) |
-| `workspace/tasks.json` | auto | Task queue for autonomous work |
-| `setup.sh` | ~250 | One-command setup |
-| `start.sh` | ~200 | Opens 4 Terminal windows (server, WhatsApp, heartbeat, CLI) |
+## Local LLM servers
 
-## Built-in Tools (18 total)
+Both scripts scan your model directories at startup — any folder with a `config.json` becomes a selectable model. No code changes needed to add a new model, just copy the folder in.
 
-### File & System Tools
-| Tool | Description |
-|------|-------------|
-| `shell` | Execute any terminal command (with configurable timeout, max 300s) |
-| `read_file` | Read file contents |
-| `write_file` | Create/write files (auto-creates parent dirs) |
-| `edit_file` | Find & replace text in files |
-| `list_dir` | List directory contents |
+| Platform | Script | Framework | Default model dir |
+|----------|--------|-----------|-------------------|
+| macOS (Apple Silicon) | `lfm_thinking.py` | MLX | `/Users/jonathanrothberg/MLX_Models/` |
+| Linux (NVIDIA) | `linux_thinking.py` | transformers / PyTorch | configurable via `MODEL_SEARCH_PATHS` |
 
-### Computer Control Tools
-| Tool | Description |
-|------|-------------|
-| `screenshot` | Capture the screen (auto-sends via WhatsApp) |
-| `mouse_click` | Click at x,y coordinates |
-| `mouse_move` | Move cursor to x,y |
-| `keyboard_type` | Type text |
-| `keyboard_hotkey` | Press shortcuts (cmd+c, etc) |
-| `get_screen_size` | Get screen dimensions |
-| `get_mouse_position` | Get cursor position |
-
-### Self-Upgrade Tools
-| Tool | Description |
-|------|-------------|
-| `install_mcp_server` | Add new MCP server capabilities |
-| `list_mcp_servers` | Show configured MCP servers with tier info |
-| `enable_mcp_server` | Enable/disable an MCP server |
-
-### Autonomous Agent Tools
-| Tool | Description |
-|------|-------------|
-| `add_task` | Add/update/complete tasks in the queue |
-| `recall_memory` | Search persistent memory (MCP + local JSON fallback) |
-
-### Network Tools
-| Tool | Description |
-|------|-------------|
-| `fetch_url` | HTTP GET/POST any URL (stdlib, no deps, 4000 char truncation) |
-
-## MCP Server Catalog (3-Tier System)
-
-Enable MCP by setting `MCP_ENABLED=true` in `.env`. Servers are launched via `npx` (requires Node.js).
-
-**All MCP tiers load in both Cloud and Local mode.** Local LLMs need access to cloud tools like brave-search for web queries. The tier labels are organizational only — they don't restrict which servers load.
-
-### Essential Tier (always loaded)
-
-| Server | Install Command | What It Does |
-|--------|----------------|--------------|
-| **filesystem** | `npx -y @modelcontextprotocol/server-filesystem /Users/you` | File search/move beyond built-ins |
-| **memory** | `npx -y @modelcontextprotocol/server-memory` | Persistent knowledge graph |
-| **time** | `npx -y @modelcontextprotocol/server-time` | Time/timezone queries (1-2 tools) |
-| **fetch** | `npx -y @modelcontextprotocol/server-fetch` | HTTP fetching via MCP |
-
-### Extended Tier (always loaded)
-
-| Server | Install Command | What It Does |
-|--------|----------------|--------------|
-| **sqlite** | `npx -y @modelcontextprotocol/server-sqlite` | Local database queries |
-| **git** | `npx -y @modelcontextprotocol/server-git` | Git operations (commit, diff, branch) |
-| **sequential-thinking** | `npx -y @modelcontextprotocol/server-sequential-thinking` | Step-by-step complex reasoning |
-| **playwright** | `npx -y @anthropic/mcp-server-playwright` | Full browser automation |
-
-### Cloud Tier (needs API keys — works from both Cloud and Local brains)
-
-| Server | Install Command | What It Needs |
-|--------|----------------|---------------|
-| **brave-search** | `npx -y @modelcontextprotocol/server-brave-search` | `BRAVE_API_KEY` |
-| **github** | `npx -y @modelcontextprotocol/server-github` | `GITHUB_TOKEN` |
-| **slack** | `npx -y @anthropic/mcp-server-slack` | `SLACK_TOKEN` |
-
-Edit `config/mcp_servers.json` to enable/configure servers. Use `/skills` in Beast to see the full catalog with install commands.
-
-## Configuration (.env)
+Common commands:
 
 ```bash
-# LLM Backend: "lfm" (local models — legacy name), "openai", or "claude"
-# Default is "lfm" — tries localhost:8000 first, then LFM_URL from below
-LLM_BACKEND=lfm
-
-# Local model server URL (when LLM_BACKEND=lfm)
-LFM_URL=http://192.168.1.100:8000
-
-# API Keys
-ANTHROPIC_API_KEY=sk-ant-...
-OPENAI_API_KEY=sk-...
-
-# WhatsApp Security - Only respond to these numbers
-ALLOWED_NUMBERS=+12025551234
-
-# MCP - External tool servers (enabled by default if servers are configured)
-MCP_ENABLED=true
+python lfm_thinking.py                            # interactive model picker + chat
+python lfm_thinking.py --model latest             # interactive with most recent model
+python lfm_thinking.py --model latest --server    # headless OpenAI-compatible API on :8000
+python test_client.py                             # quick streaming sanity test
 ```
 
-## Testing Different LLM Backends
+Features: dynamic model discovery, automatic text/vision detection, streaming, image and video analysis for VL models, optional TTS, OpenAI-compatible `/v1/chat/completions`.
 
-**Safe testing without modifying your main `.env`:**
+> The `lfm_` and `LFM_URL` naming is a legacy artifact from the project's LiquidAI days. The scripts now work with any compatible model.
+
+---
+
+## Obedient Beast
+
+Beast is a small agent that runs an LLM-tool loop:
+
+```
+User (CLI / WhatsApp / HTTP)
+        │
+        ▼
+    beast.run(input)   ← loads history, picks tools, loops until done
+        │
+   ┌────┼────────────────────────────────┐
+   │    │                │                │
+   ▼    ▼                ▼                ▼
+llm.py  Built-in Tools   Skills          MCP servers
+(3      (24 tools)       (SKILL.md       (filesystem,
+ back-                    runbooks)       memory, git,
+ ends)                                    playwright, …)
+```
+
+### Why Beast is interesting
+
+- **One file, one loop.** `beast.py` is ~1,800 lines of readable Python. No framework, no hidden magic.
+- **Three brains.** Swap Claude, OpenAI, or a local model with one env var (`LLM_BACKEND=claude|openai|lfm`) or a slash command (`/claude`, `/openai`, `/lfm`).
+- **Depth control.** `/depth N` sets how many tool-call steps the model may chain per request. Cloud defaults to 10, local to 5.
+- **Layered system prompt.** Every turn, Beast composes its prompt from `SOUL.md` (personality) + `AGENTS.md` (standing goals) + an auto-generated **skills index** + an auto-generated **tools manifest** + a safety fallback.
+- **Persistent memory.** Facts go to `workspace/memory.json` (always on), and optionally into an MCP knowledge-graph server for richer recall.
+- **Autonomous task queue.** `add_task` writes to `workspace/tasks.json`; `heartbeat.py` picks up pending tasks on a timer and runs them in a fresh session.
+- **Self-upgrade.** Beast can `install_mcp_server` to add new tool packs at runtime.
+- **OpenClaw-inspired additions** (see below): skills registry, cron schedules, persistent browser, TOOLS.md composition, `use_skill` / `list_skills` tools.
+
+### Built-in tool categories
+
+| Category | Tools |
+|----------|-------|
+| Files & shell | `shell`, `read_file`, `write_file`, `edit_file`, `list_dir` |
+| Desktop control | `screenshot`, `mouse_click`, `mouse_move`, `keyboard_type`, `keyboard_hotkey`, `get_screen_size`, `get_mouse_position` |
+| Self-upgrade | `install_mcp_server`, `list_mcp_servers`, `enable_mcp_server` |
+| Autonomy | `add_task` (supports `scheduled_at`, `repeat_seconds`, `cron`), `recall_memory` |
+| Network | `fetch_url` |
+| Skills | `list_skills`, `use_skill` |
+| Persistent browser | `browser_goto`, `browser_read`, `browser_click`, `browser_type`, `browser_screenshot`, `browser_close` |
+
+### Slash commands
+
+`/help`, `/more`, `/status`, `/tasks`, `/done <id>`, `/drop <id>`, `/claude`, `/openai`, `/lfm`, `/depth <n>`, `/model`, `/heartbeat on|off`, `/clear`, `/clear tasks`, `/clear memory`, `/clear all`, `/tools`, `/skills`.
+
+Slash commands are handled before the LLM sees the input.
+
+---
+
+## Adding a skill
+
+Skills are markdown runbooks that live in `obedient_beast/workspace/skills/<name>/SKILL.md`. Each one is a high-level *recipe* composed from Beast's low-level tools. Adding a skill = writing a markdown file. No code, no restart (the skills loader rescans on every `list_skills` / `use_skill` call).
+
+Minimal example:
+
+```markdown
+---
+name: weekly-review
+description: Summarize last week's activity from my journal and queue TODOs.
+triggers: weekly review, Sunday planning
+---
+
+# Weekly Review Skill
+
+1. Use `shell` to `ls -t ~/journal/*.md | head -7` to find this week's entries.
+2. `read_file` each one and extract any line starting with "TODO".
+3. `add_task` each TODO with priority=medium.
+4. Write a one-page summary to `workspace/reports/<date>.md`.
+5. Report what you did in one paragraph.
+```
+
+At startup Beast injects every skill's name + description into the system prompt under `## Available Skills`. When the user says "do my weekly review", the LLM sees the match, calls `use_skill(name="weekly-review")` to load the full body, and follows the instructions step by step.
+
+A seed `research` skill ships with the repo — read it as a template.
+
+---
+
+## Scheduling work with cron
+
+`add_task` supports three scheduling modes:
+
+| Field | Behavior |
+|-------|----------|
+| _(none)_ | run immediately when the heartbeat next wakes |
+| `scheduled_at` | one-shot, fires after the given ISO timestamp |
+| `repeat_seconds` | simple interval recurrence |
+| `cron` | 5-field cron expression (`minute hour dom month dow`) |
+
+Cron examples (evaluated by `cron_schedule.py`, zero deps):
+
+```
+0 9 * * 1-5     # every weekday at 9am
+*/15 * * * *    # every 15 minutes
+0 0 1 * *       # midnight on the 1st of every month
+30 8 * * 1      # 8:30am every Monday
+```
+
+The heartbeat loop (`heartbeat.py`) walks the task queue every `HEARTBEAT_INTERVAL_SEC` seconds, runs any task whose `next_run_at` has passed, and for recurring tasks computes the next fire time using the cron parser.
+
+---
+
+## Persistent browser control
+
+`browser_*` tools drive a real headful Chromium context whose cookies, localStorage, and extensions live on disk in `workspace/browser_profile/`. Log into a site once in the visible window and Beast reuses the session forever — the same trick OpenClaw uses with its managed browser.
 
 ```bash
-# Test local models temporarily (backend name "lfm" is legacy)
-LLM_BACKEND_TEST=lfm python3 beast.py
-
-# Test OpenAI temporarily
-LLM_BACKEND_TEST=openai python3 beast.py
-
-# Test Claude (default)
-python3 beast.py  # Uses LLM_BACKEND from .env
+pip install playwright
+python -m playwright install chromium
 ```
 
-This overrides your `.env` setting just for that session -- your main config stays unchanged.
-
-### Depth — Controlling Tool-Call Chains
-
-"Depth" controls how many tool-call steps the model can chain per request. Cloud defaults to 10, Local defaults to 5. Adjust at runtime:
+Then from a Beast conversation:
 
 ```
-/depth 3    → chain up to 3 steps per request (faster, simpler)
-/depth 10   → chain up to 10 steps (more complex tasks)
-/depth      → show current depth
+> open GitHub and tell me my notification count
 ```
 
-Strong local models (Qwen3.5-122B, etc.) handle multi-step chains well. If you're using a smaller/weaker local model and it loops, reduce depth with `/depth 2`.
+The LLM calls `browser_goto(url="https://github.com/notifications")`, then `browser_read()`, and answers from the page text. To run headless on a server, set `BEAST_BROWSER_HEADLESS=true`.
 
-## Slash Commands (work in both WhatsApp and CLI)
+**Security note:** This is full browser access with your real cookies. Treat Beast like any other tool that can act as you online.
 
-| Command | What it does |
-|---------|-------------|
-| `/help` | Quick help with top commands |
-| `/more` | Full detailed help with examples |
-| `/status` | Show brain mode, depth, heartbeat state, task summary |
-| `/tasks` | List all tasks with status |
-| `/done 3` | Mark task #3 as done |
-| `/drop 3` | Remove task #3 |
-| `/claude` | Switch to Cloud brain (Claude) |
-| `/openai` | Switch to Cloud brain (OpenAI) |
-| `/lfm` | Switch to Local brain |
-| `/depth 5` | Set tool-chain depth (steps per request, range 1-20) |
-| `/depth` | Show current depth |
-| `/model` | List available local models |
-| `/model Qwen3` | Hot-swap local model (no restart needed) |
-| `/heartbeat on` | Enable background task processing |
-| `/heartbeat off` | Pause background task processing |
-| `/heartbeat` | Show heartbeat status |
-| `/clear` | Clear chat history only |
-| `/clear tasks` | Clear task queue only |
-| `/clear memory` | Clear saved memories (local JSON) |
-| `/clear all` | Clear everything (history + tasks + memory) |
-| `/tools` | List all available tools |
-| `/skills` | MCP server catalog with install commands |
+---
 
-**CLI-only commands:**
+## Environment variables
 
-| Command | What it does |
-|---------|-------------|
-| `/new` | Reset conversation (start fresh session) |
-| `/quit` | Exit CLI |
+`.env` lives in `obedient_beast/`. The most important knobs:
 
-All backend switching, task management, and heartbeat control works from **both WhatsApp and CLI**.
-
-## Task Queue — How to Add Tasks
-
-Beast has an autonomous task queue. There are **3 ways to add tasks**:
-
-### 1. Ask Beast (WhatsApp or CLI)
-Just say things like:
-- "Remind me to check disk space later"
-- "Add a task to organize my downloads"
-- "Queue up: review the log files"
-
-Beast recognizes phrases like "remind me", "later", "add a task" and uses the `add_task` tool automatically.
-
-### 2. Edit tasks.json directly
-Open `workspace/tasks.json` and add a task:
-```json
-{
-  "tasks": [
-    {
-      "id": 1,
-      "description": "check disk space",
-      "priority": "medium",
-      "status": "pending",
-      "created_at": "2026-02-06T10:00:00"
-    }
-  ]
-}
-```
-
-### 3. Via the heartbeat
-When Beast runs autonomously, it can add follow-up tasks to its own queue.
-
-### Check your queue
-- CLI: type `/status`
-- WhatsApp: send `/status`
-- Terminal: `python heartbeat.py --status`
-
-## Autonomous Heartbeat
-
-Beast can work on tasks **by itself** on a timer, without you sending messages.
-
-**The heartbeat starts automatically with `./start.sh`** (it gets its own Terminal window). You can also run it standalone:
-
-```bash
-python heartbeat.py              # Run heartbeat loop (Ctrl+C to stop)
-python heartbeat.py --once       # Process one cycle and exit
-python heartbeat.py --status     # Show task queue
-```
-
-**How it works:**
-1. Heartbeat wakes up every N minutes (5 min Cloud, 10 min Local)
-2. Checks `workspace/tasks.json` for pending tasks
-3. Picks the highest-priority task and feeds it to `beast.run()`
-4. Beast processes it (using tools as needed) and marks it done/failed
-5. Goes back to sleep
-
-**Control from WhatsApp or CLI:**
-- `/heartbeat on` — enable processing
-- `/heartbeat off` — pause processing (heartbeat stays running but skips tasks)
-- `/heartbeat` — check if it's on or off
-
-## What Beast Stores (and How to Clear It)
-
-Beast saves 4 types of data. Each can be cleared independently:
-
-| What | Where it lives | What it holds | How to clear |
-|------|---------------|---------------|-------------|
-| **Chat history** | `sessions/*.jsonl` | Every conversation (CLI + WhatsApp) | `/clear` |
-| **Task queue** | `workspace/tasks.json` | To-do list for the heartbeat | `/clear tasks` |
-| **Local memory** | `workspace/memory.json` | Facts Beast remembers (up to 200, auto-capped) | `/clear memory` |
-| **MCP knowledge graph** | External MCP server | Rich knowledge graph (if MCP memory enabled) | Ask Beast: "forget everything in memory" |
-
-- `/clear all` wipes chat history + tasks + local memory in one command
-- The MCP knowledge graph is separate because it runs as an external server — Beast can't directly delete its data with a slash command, but you can ask Beast to do it via the MCP tools
-- `/new` (CLI only) starts a fresh conversation **without** deleting anything
-
-## Cloud vs Local — Settings
-
-Beast automatically adjusts settings based on which brain is active:
-
-| Setting | Cloud (Claude/OpenAI) | Local (your machine) |
-|---------|----------------------|---------------------|
-| Default depth (tool steps) | 10 | 5 |
-| Heartbeat interval | 5 min | 10 min |
-| Tasks per heartbeat cycle | 3 | 2 |
-| Memory detail saved | Full | Full |
-| MCP servers loaded | All | All |
-
-Depth is adjustable at runtime with `/depth N`. Settings are in `capabilities.py` and auto-detect from `LLM_BACKEND` in `.env`.
-
-## WhatsApp Setup
-
-1. Run `./setup.sh` (installs Node.js dependencies)
-2. Run `./start.sh`
-3. Scan the QR code with WhatsApp (Settings → Linked Devices)
-4. Message yourself or create a solo group to chat with Beast
-
-### WhatsApp Credentials & Backup
-
-Your WhatsApp session is stored in two places:
-
-| Location | Purpose |
+| Variable | Purpose |
 |----------|---------|
-| `obedient_beast/whatsapp/auth_info/` | Active credentials (gitignored) |
-| `~/.beast_whatsapp_backup/` | Auto-backup (in your home folder) |
-
-**Auto-backup**: After each successful connection, Beast automatically backs up your credentials to `~/.beast_whatsapp_backup/`. If `auth_info/` is deleted, it auto-restores on next startup.
-
-**"Try again later" error?** WhatsApp rate-limits device linking. Wait 10-15 minutes.
-
-### Moving Beast to Another Machine
-
-To run Beast on a new computer without re-scanning the QR code:
-
-**1. Copy these files from your current machine:**
-```bash
-# Your configuration (API keys, settings)
-scp ~/.env user@new-machine:/path/to/AGENTS/.env
-
-# WhatsApp credentials (pick one):
-scp -r ~/.beast_whatsapp_backup user@new-machine:~/
-# OR
-scp -r obedient_beast/whatsapp/auth_info user@new-machine:/path/to/AGENTS/obedient_beast/whatsapp/
-```
-
-**2. On the new machine:**
-```bash
-git clone https://github.com/jmrothberg/AGENTS.git
-cd AGENTS/obedient_beast
-./setup.sh
-./start.sh  # No QR scan needed - credentials auto-restore!
-```
-
-**Full paths on macOS:**
-```
-~/.env                              → /Users/YOUR_USERNAME/.env
-~/.beast_whatsapp_backup/           → /Users/YOUR_USERNAME/.beast_whatsapp_backup/
-obedient_beast/whatsapp/auth_info/  → Inside the AGENTS repo
-```
-
-### @beast in Group Chats
-
-Beast normally stays quiet in shared group chats (groups with other people). To summon Beast for a single message, start it with `@beast`:
-
-```
-@beast check disk space
-@beast what's the weather in NYC
-```
-
-- Only YOU (the phone owner) can use `@beast` — other group members can't trigger it
-- Beast responds in the group chat, then goes quiet again
-- Works in any group, even those not in `ALLOWED_GROUPS`
-
-### WhatsApp Security
-
-- Beast uses YOUR WhatsApp account (not a separate bot)
-- Set `ALLOWED_NUMBERS` to restrict who can trigger responses
-- Group messages only respond to the account owner (or via `@beast`)
-- DMs check against the allowlist
-
-## Recommended Models for Tool Calling
-
-| Model | Size (4-bit) | Tool Calling |
-|-------|-------------|--------------|
-| Qwen3-32B-MLX-4bit | ~18GB | ✅ Native |
-| Llama-3.3-70B-Instruct-4bit | ~40GB | ✅ Native |
-| Qwen2.5-72B-Instruct-4bit | ~41GB | ✅ Native |
-| GLM-4.7-Flash | ~4GB | ✅ Native |
-
-## Why Beast > OpenClaw
-
-| Feature | OpenClaw | Obedient Beast |
-|---------|----------|----------------|
-| MCP Support | ❌ Custom only | ✅ Native MCP with 3-tier catalog (11 servers) |
-| Tool Ecosystem | Closed | Open (any MCP + 19 built-in) |
-| Computer Control | Via plugins | Built-in (screenshot, mouse, keyboard) |
-| Autonomous Tasks | Cron/webhooks | Heartbeat + task queue + scheduled/recurring |
-| Persistent Memory | Via plugins | Built-in (BM25 + temporal decay, MCP graph optional) |
-| Web/HTTP Fetching | Via plugins | Built-in `fetch_url` + MCP fetch server |
-| Backend Switching | ❌ | `/claude` `/openai` `/lfm` live |
-| LLM Fallback Chain | ❌ | `LLM_FALLBACK=claude,openai` — retries on failure |
-| Depth Control | ❌ | `/depth N` — tune tool-chain steps at runtime |
-| Loop Detection | ❌ | ✅ Bails on repeated tool calls / errors |
-| Sub-Agent Spawning | ❌ | ✅ `spawn_agent` tool for isolated subtasks |
-| Startup Routines | Cron | ✅ `workspace/BOOT.md` — daily standing orders |
-| Smart Memory Save | ❌ | ✅ Atomic facts + dedupe + categorization |
-| Context Trimming | ❌ | ✅ Auto-summarizes dropped turns |
-| Vision Input | ❌ | `/image` (drops gracefully to non-VLM models) |
-| Auto Memory Recall | ❌ | ✅ At session start |
-| Codebase Size | 150k+ lines | ~2.9k lines (heavily commented) |
-| Local-first | ✅ | ✅ |
-| Setup | Complex | One command |
+| `LLM_BACKEND` | `claude`, `openai`, or `lfm` |
+| `LLM_BACKEND_TEST` | one-session override of `LLM_BACKEND` |
+| `ANTHROPIC_API_KEY` / `OPENAI_API_KEY` | cloud credentials |
+| `LFM_URL` | local LLM server URL (default `http://localhost:8000/v1`) |
+| `MCP_ENABLED` | `true`/`false` — load MCP tool servers at startup |
+| `BEAST_BROWSER_HEADLESS` | run Playwright headless (default `false`) |
+| `ALLOWED_NUMBERS` / `ALLOWED_GROUPS` | WhatsApp access control |
+| `NOTIFICATION_CHAT_ID` | WhatsApp target for autonomous task notifications |
+| `HEARTBEAT_INTERVAL_SEC` | seconds between heartbeat cycles |
 
 ---
 
-## License
+## For LLMs reading this repo
 
-MIT
+If you are an LLM reading this to understand the codebase, here is the minimal model you need:
+
+- **Entry point for the agent is `obedient_beast/beast.py`.** The main loop is `run(user_input, session_id, llm)`. It loads history, calls the LLM with `SYSTEM_PROMPT` + tools, executes any tool calls via `execute_tool(name, args)`, and loops until the LLM returns a plain text reply.
+- **`SYSTEM_PROMPT` is composed by `load_system_prompt()`**, which concatenates `workspace/SOUL.md`, `workspace/AGENTS.md`, the skills index from `skills_loader.get_skills_index()`, and an auto-generated tools manifest from `_render_tools_manifest()`. Never hard-code tool lists — they come from the `TOOLS` list in `beast.py` and are rendered at startup.
+- **Tools are dicts** with `name`, `description`, `params`. Dispatch lives in `execute_tool()` as a long `elif` chain. To add a tool, append to `TOOLS` and add a branch in `execute_tool`.
+- **Skills are markdown files**, not code. To add a skill, write `workspace/skills/<name>/SKILL.md` with optional frontmatter (`name`, `description`, `triggers`) and a step-by-step body. The agent discovers it on the next `list_skills` or `use_skill` call.
+- **Tasks are JSON records** in `workspace/tasks.json`. Fields: `id`, `description`, `priority`, `status`, `scheduled_at?`, `repeat_seconds?`, `cron?`, `next_run_at?`. `heartbeat.py` owns recurrence logic via `_reset_recurring_task()`.
+- **Three LLM backends** are unified in `llm.py`. The local backend speaks to `lfm_thinking.py` or `linux_thinking.py` over OpenAI-compatible HTTP. Tool calling falls back to a text-parsing format for models without native tool support.
+- **MCP servers** are optional tool packs spawned as subprocesses at startup. Their tools appear with names prefixed `mcp_<servername>_`. See `mcp_client.py` and `config/mcp_servers.json`.
+- **Do not add new frameworks.** The project's value is that it's small, flat Python with readable inline commentary. When adding features, prefer a new focused module (like `cron_schedule.py`, `skills_loader.py`, `browser_tools.py`) and wire it into `beast.py` with a few lines.
+
+---
+
+## Troubleshooting
+
+- **`/skills` shows nothing** → the `list_skills` tool reads `workspace/skills/`. Drop a `SKILL.md` in there and call it again.
+- **Cron task never fires** → check `heartbeat.py --status` to confirm the task has a `next_run_at` in the future, and make sure the heartbeat is actually running (`/heartbeat` from the CLI).
+- **`browser_goto` returns "Playwright is not installed"** → `pip install playwright && python -m playwright install chromium`.
+- **Local LLM timing out** → make sure `lfm_thinking.py --server` is running and `LFM_URL` in `.env` points to the right port.
+- **MCP server won't load** → run with `MCP_ENABLED=true` and check logs; Beast keeps running on MCP failures, so missing MCP tools just reduce capability, they don't crash the agent.
+
+---
+
+Beast stays small on purpose. Every file is meant to be readable end-to-end in one sitting. When in doubt, read the source — inline comments explain the "why" alongside the "what".

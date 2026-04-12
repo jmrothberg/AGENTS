@@ -12,3 +12,8 @@ pillow>=10.0.0
 
 # MCP Client (Phase 2)
 mcp>=1.0.0
+
+# Optional: Persistent Browser Control (Phase 5, OpenClaw-inspired)
+# Uncomment to enable browser_* tools. After installing, run:
+#   python -m playwright install chromium
+# playwright>=1.44.0

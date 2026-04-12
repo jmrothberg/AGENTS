@@ -30,3 +30,10 @@ obedient_beast/.whatsapp.pid
 .vscode/
 *.sublime-*
 obedient_beast/workspace/screenshots/
+
+# WhatsApp media cache
+obedient_beast/workspace/media/
+
+# Python bytecode
+__pycache__/
+*.pyc

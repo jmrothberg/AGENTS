@@ -167,7 +167,50 @@ def get_and_clear_pending_image() -> str:
 # AGENTS.md defines task queue rules, reasoning templates, and standing goals.
 # Both are optional — if missing, a minimal default prompt is used.
 
+def _render_tools_manifest() -> str:
+    """Auto-generate a TOOLS.md-style section for the system prompt.
+
+    OpenClaw injects a TOOLS.md file that lists every capability alongside
+    SOUL.md and AGENTS.md. We do the same dynamically: the manifest always
+    reflects the *current* TOOLS list, so newly-added tools become visible to
+    the LLM immediately without editing a markdown file by hand.
+    """
+    lines = [
+        "## Tools Manifest",
+        "",
+        "These are the tools currently wired into your agent loop. Call them",
+        "by name with the documented parameters. Tools are the atomic verbs;",
+        "skills (see Available Skills) are recipes built on top of them.",
+        "",
+    ]
+    for tool in TOOLS:
+        lines.append(f"### `{tool['name']}`")
+        lines.append(tool.get("description", ""))
+        params = tool.get("params") or {}
+        if params:
+            lines.append("")
+            lines.append("Parameters:")
+            for key, desc in params.items():
+                lines.append(f"- `{key}` — {desc}")
+        lines.append("")
+    return "\n".join(lines)
+
+
 def load_system_prompt() -> str:
+    """Compose the system prompt from SOUL.md + AGENTS.md + skills + tools.
+
+    Layered prompt composition is one of the most powerful OpenClaw patterns:
+    each layer answers a different question the LLM needs to know at every
+    turn.
+
+    - **SOUL.md** — who am I and how do I behave?
+    - **AGENTS.md** — what standing goals, reasoning templates, and memory
+      rules should I follow?
+    - **Skills index** — what high-level recipes can I pull in on demand via
+      `use_skill`?
+    - **Tools manifest** — what low-level verbs do I have right now?
+    - **Base prompt** — a last-resort fallback if nothing else is configured.
+    """
     soul_file = WORKSPACE / "SOUL.md"
     agents_file = WORKSPACE / "AGENTS.md"
     base_prompt = """You are Obedient Beast, a helpful AI assistant that can execute commands and manage files.
@@ -180,11 +223,23 @@ Be concise and helpful. When executing commands, explain what you're doing."""
     # AGENTS.md: standing goals, reasoning templates, memory guidelines (Phase 4)
     if agents_file.exists():
         prompt += agents_file.read_text() + "\n\n"
+    # Skills index: markdown runbooks loaded on demand via `use_skill`.
+    try:
+        from skills_loader import get_skills_index
+        skills_block = get_skills_index()
+        if skills_block:
+            prompt += skills_block + "\n"
+    except Exception as exc:  # pragma: no cover — never block startup on skills
+        print(f"[Skills] Could not load skills index: {exc}", file=sys.stderr)
+    # Tools manifest: auto-generated from the TOOLS list below.
+    prompt += _render_tools_manifest() + "\n"
     prompt += base_prompt
     return prompt
 
 
-SYSTEM_PROMPT = load_system_prompt()
+# SYSTEM_PROMPT is deferred: TOOLS is defined further down, and the manifest
+# renderer reads it at call time. We assign after TOOLS is defined.
+SYSTEM_PROMPT = ""
 
 
 # ---------------------------------------------------------------------------
@@ -555,14 +610,15 @@ TOOLS = [
     #   falls back to local JSON memory (workspace/memory.json) when not.
     {
         "name": "add_task",
-        "description": "Add, update, or complete a task in the autonomous task queue. Beast and users can queue work for later. Supports scheduling: use scheduled_at for one-shot timed tasks, repeat_seconds for recurring tasks.",
+        "description": "Add, update, or complete a task in the autonomous task queue. Beast and users can queue work for later. Supports scheduling: use scheduled_at for one-shot timed tasks, repeat_seconds for simple interval recurrence, or cron for cron-style recurrence.",
         "params": {
             "description": "What the task is (required for new tasks)",
             "priority": "low, medium, or high (default: medium)",
             "status": "pending, done, or failed (default: pending). Use 'done'/'failed' to close a task.",
             "task_id": "Optional: ID of existing task to update its status",
             "scheduled_at": "Optional: ISO timestamp for when to run (e.g., '2026-02-28T15:00:00'). Task won't be processed until this time.",
-            "repeat_seconds": "Optional: interval in seconds for recurring tasks (e.g., 3600 for hourly, 86400 for daily). Task auto-resets after each run."
+            "repeat_seconds": "Optional: interval in seconds for recurring tasks (e.g., 3600 for hourly, 86400 for daily). Task auto-resets after each run.",
+            "cron": "Optional: 5-field cron expression (min hour dom month dow), e.g. '0 9 * * 1-5' for 9am weekdays. Overrides repeat_seconds when both are set."
         }
     },
     {
@@ -602,7 +658,70 @@ TOOLS = [
             "depth": "Optional: max tool-chain steps for the sub-agent (default: 3, max: 10)"
         }
     },
+    # ---------------------------------------------------------------------------
+    # Skills (OpenClaw-inspired): markdown runbooks loaded on demand
+    # ---------------------------------------------------------------------------
+    # Skills live in workspace/skills/<name>/SKILL.md. `list_skills` shows the
+    # catalog; `use_skill` loads a specific skill's full instructions into the
+    # conversation so Beast can follow them step by step. This is the core of
+    # Beast's ClawHub-style extensibility: adding capabilities = writing a
+    # markdown file, no code changes required.
+    {
+        "name": "list_skills",
+        "description": "List all available skills (markdown runbooks in workspace/skills/). Use this to discover what recipes you already have before writing new code.",
+        "params": {}
+    },
+    {
+        "name": "use_skill",
+        "description": "Load a skill's full instructions by name. Returns the SKILL.md body — follow its steps exactly. Use when a user request matches a skill's description or triggers.",
+        "params": {"name": "Skill name (see list_skills for valid names)"}
+    },
+    # ---------------------------------------------------------------------------
+    # Persistent Browser (OpenClaw-inspired): Playwright with a profile on disk
+    # ---------------------------------------------------------------------------
+    # Unlike fetch_url, these tools drive a real headful Chromium context whose
+    # cookies/localStorage live in workspace/browser_profile/. Log into GitHub /
+    # Gmail / Slack once in the visible window and every subsequent run reuses
+    # the session. Lazy-imported so Beast starts fine without Playwright.
+    {
+        "name": "browser_goto",
+        "description": "Navigate the persistent browser to a URL. Cookies and logins are reused across runs (see workspace/browser_profile/). Returns the final URL and page title.",
+        "params": {"url": "Absolute URL to open (http:// or https://)"}
+    },
+    {
+        "name": "browser_read",
+        "description": "Return the visible text of the current browser page (truncated to 4000 chars). Call after browser_goto.",
+        "params": {"max_chars": "Optional: max chars to return (default 4000)"}
+    },
+    {
+        "name": "browser_click",
+        "description": "Click the first element matching a CSS selector in the browser (e.g. 'button[type=submit]', 'text=Sign in').",
+        "params": {"selector": "CSS selector or Playwright text locator"}
+    },
+    {
+        "name": "browser_type",
+        "description": "Type text into an input element matching a CSS selector. Optionally submit by pressing Enter.",
+        "params": {
+            "selector": "CSS selector for the input",
+            "text": "Text to type",
+            "submit": "Optional: 'true' to press Enter after typing"
+        }
+    },
+    {
+        "name": "browser_screenshot",
+        "description": "Screenshot the current browser page. Returns the saved file path (also queued for WhatsApp delivery).",
+        "params": {"filename": "Optional filename (default: browser_<timestamp>.png)"}
+    },
+    {
+        "name": "browser_close",
+        "description": "Close the persistent browser context. Cookies remain on disk for the next session.",
+        "params": {}
+    },
 ]
+
+# Now that TOOLS is defined, compose the full system prompt (SOUL + AGENTS +
+# skills index + auto-generated tools manifest + fallback base prompt).
+SYSTEM_PROMPT = load_system_prompt()
 
 
 def execute_tool(name: str, args: dict) -> str:
@@ -822,9 +941,10 @@ def execute_tool(name: str, args: dict) -> str:
                     "status": args.get("status", "pending"),
                     "created_at": datetime.now().isoformat()
                 }
-                # Scheduling: one-shot or recurring
+                # Scheduling: one-shot, interval-recurring, or cron-recurring.
                 scheduled_at = args.get("scheduled_at")
                 repeat_seconds = args.get("repeat_seconds")
+                cron_expr = args.get("cron")
                 timing_info = ""
                 if scheduled_at:
                     new_task["scheduled_at"] = scheduled_at
@@ -837,6 +957,17 @@ def execute_tool(name: str, args: dict) -> str:
                         timing_info = f" (recurring every {interval}s)"
                     except ValueError:
                         pass
+                if cron_expr:
+                    # Validate by computing the first next_run_at. Errors are
+                    # surfaced as task-add failures so the LLM can retry.
+                    try:
+                        from cron_schedule import next_run
+                        nxt = next_run(cron_expr)
+                        new_task["cron"] = cron_expr
+                        new_task["next_run_at"] = nxt.isoformat()
+                        timing_info = f" (cron '{cron_expr}', next run {nxt.isoformat()})"
+                    except Exception as exc:
+                        return f"Error: invalid cron expression {cron_expr!r}: {exc}"
                 data["tasks"].append(new_task)
                 tasks_file.write_text(json.dumps(data, indent=2))
                 return f"Task #{new_task['id']} added: {new_task['description']} [{new_task['priority']}]{timing_info}"
@@ -924,6 +1055,89 @@ def execute_tool(name: str, args: dict) -> str:
             finally:
                 capabilities.DEPTH = prev_depth
             return f"[sub-agent {sub_session} result]\n{sub_result}"
+
+        # === Skills (markdown runbooks) ===
+        elif name == "list_skills":
+            from skills_loader import discover_skills
+            skills = discover_skills()
+            if not skills:
+                return (
+                    "No skills installed yet. Create one at "
+                    "workspace/skills/<name>/SKILL.md with frontmatter "
+                    "(name, description, triggers) and markdown instructions."
+                )
+            lines = ["Available skills:"]
+            for s in skills:
+                line = f"  • {s['name']} — {s['description']}"
+                if s["triggers"]:
+                    line += f" (triggers: {s['triggers']})"
+                lines.append(line)
+            lines.append("\nCall use_skill(name=...) to load a skill's full instructions.")
+            return "\n".join(lines)
+
+        elif name == "use_skill":
+            from skills_loader import get_skill
+            skill_name = args.get("name", "").strip()
+            if not skill_name:
+                return "Error: use_skill requires a 'name' argument."
+            body = get_skill(skill_name)
+            if body is None:
+                return (
+                    f"Error: skill {skill_name!r} not found. "
+                    "Call list_skills to see what's available."
+                )
+            return (
+                f"# Skill: {skill_name}\n\n"
+                "Follow these instructions exactly:\n\n" + body
+            )
+
+        # === Persistent Browser (Playwright) ===
+        elif name == "browser_goto":
+            from browser_tools import browser_goto, BrowserUnavailable
+            try:
+                return browser_goto(args["url"])
+            except BrowserUnavailable as exc:
+                return f"Error: {exc}"
+
+        elif name == "browser_read":
+            from browser_tools import browser_read, BrowserUnavailable
+            try:
+                max_chars = int(args.get("max_chars") or 4000)
+                return browser_read(max_chars=max_chars)
+            except BrowserUnavailable as exc:
+                return f"Error: {exc}"
+
+        elif name == "browser_click":
+            from browser_tools import browser_click, BrowserUnavailable
+            try:
+                return browser_click(args["selector"])
+            except BrowserUnavailable as exc:
+                return f"Error: {exc}"
+
+        elif name == "browser_type":
+            from browser_tools import browser_type, BrowserUnavailable
+            submit = str(args.get("submit", "")).lower() in ("1", "true", "yes")
+            try:
+                return browser_type(args["selector"], args["text"], submit=submit)
+            except BrowserUnavailable as exc:
+                return f"Error: {exc}"
+
+        elif name == "browser_screenshot":
+            from browser_tools import browser_screenshot, BrowserUnavailable
+            try:
+                path = browser_screenshot(args.get("filename"))
+                # Queue for WhatsApp delivery, matching the desktop screenshot tool.
+                set_pending_image(path)
+                return f"Browser screenshot saved to {path}. Will send via WhatsApp."
+            except BrowserUnavailable as exc:
+                return f"Error: {exc}"
+
+        elif name == "browser_close":
+            from browser_tools import browser_close, BrowserUnavailable
+            try:
+                return browser_close()
+            except BrowserUnavailable as exc:
+                return f"Error: {exc}"
 
         # === MCP Tools ===
         # Any tool name starting with "mcp_" is routed to the MCP client.
@@ -1417,7 +1631,7 @@ I'm an AI assistant that lives on your computer. You talk to me (here in the ter
 
         arg = cmd[len("/model"):].strip()
 
-        if arg:
+        if arg and arg.lower() not in ("list", "ls", "available"):
             # Switch to the specified model
             try:
                 data = json.dumps({"model": arg}).encode()

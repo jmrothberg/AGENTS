@@ -1,12 +1,88 @@
 {
   "facts": [
     {
-      "text": "Session wa_OWNER: user asked about 'how is the weather in guilford?'",
-      "timestamp": "2026-02-08T21:15:13.747242"
+      "text": "Session wa_OWNER: user asked 'What is this?', beast responded with 'The user is asking \"What is this?\" based on an image of a dog.\n\n1.  **Identify the main subject:** It's a dog.\n2.  **Identify the breed:** The dog has black fur with tan/rust markings on the face, eye'",
+      "timestamp": "2026-03-01T11:17:12.898677"
     },
     {
-      "text": "Session cli_20260208_212712: user asked about 'what the weather like in miami'",
-      "timestamp": "2026-02-08T21:27:29.276077"
+      "text": "Session wa_OWNER: user asked 'Did it just hail in Miami?', beast responded with 'The user is asking about recent hail in Miami. I have search results that indicate hail was reported in Miami-Dade and Broward Counties. One result from NBC 6 South Florida mentions \"Saturday began wi'",
+      "timestamp": "2026-03-01T15:02:19.408506"
+    },
+    {
+      "text": "Session wa_OWNER: user asked 'Did it just hail in Miami today?', beast responded with 'The user is asking about whether it hailed in Miami today. I've already received search results from a previous tool call. Now I need to summarize this information for the user in a helpful way.\n\nLook'",
+      "timestamp": "2026-03-01T16:00:49.661855"
+    },
+    {
+      "text": "Session wa_OWNER: user asked 'Do I have files that I can erase that are never used and take up a lot of space.', beast responded with 'The user is asking about files they can erase that are never used and take up a lot of space. I've listed their home directory contents and can see various folders and files. Let me analyze what could'",
+      "timestamp": "2026-03-03T11:21:23.803518"
+    },
+    {
+      "text": "Session cli_20260301_155558: user asked 'hi', beast responded with 'The user just said \"hi\" - this is a simple greeting. I don't need to use any tools for this. I should just respond naturally without any tool calls.\n\nHowever, looking at the instructions, it says \"To '",
+      "timestamp": "2026-03-14T18:46:35.754697"
+    },
+    {
+      "text": "Session cli_20260301_155558: user asked 'can you check my calendar to see if i have meetings today', beast responded with 'The user is asking me to check their calendar to see if they have meetings today. Looking at the available tools, I don't see a specific calendar tool. The available tools are:\n\n- shell(command, timeo'",
+      "timestamp": "2026-03-14T18:47:19.444416"
+    },
+    {
+      "text": "Session cli_20260315_120830: user asked 'hi', beast responded with 'The user just said \"hi\" - this is a simple greeting. I don't need to use any tools for this. I should just respond naturally without any tool calls.\n\nHowever, looking at the instructions, it says \"To '",
+      "timestamp": "2026-03-15T12:17:45.268713"
+    },
+    {
+      "text": "Session wa_OWNER: user asked 'How\u2019s the weather in Miami', beast responded with 'The user is asking about the weather in Miami. I already searched for this and got results. Now I need to summarize the weather information from the search results for the user.\n\nFrom the search resul'",
+      "timestamp": "2026-03-15T15:26:37.998337"
+    },
+    {
+      "text": "Session cli_20260315_120830: user asked 'weather in new haven today', beast responded with 'The user is asking for weather information in New Haven today. I've already received search results from a previous tool call (brave-search). Now I need to summarize this information for the user in a'",
+      "timestamp": "2026-03-16T10:04:28.184062"
+    },
+    {
+      "text": "Session cli_20260315_120830: user asked 'hi', beast responded with 'The user just said \"hi\" again. This is a simple greeting and doesn't require any tools. I should respond naturally without any tool calls.\n\nLooking at the instructions, it says \"To use a tool, respond'",
+      "timestamp": "2026-03-16T14:24:38.439148"
+    },
+    {
+      "text": "Session wa_OWNER: user asked 'Move the cursor to center of the screen', beast responded with 'The user is asking me to move the cursor to the center of the screen. I already did this in the previous turn and got a result. Now I need to summarize this result for the user in a helpful way.\n\nHowe'",
+      "timestamp": "2026-03-16T14:41:08.477211"
+    },
+    {
+      "text": "Session wa_OWNER: user asked 'How\u2019s the weather in Miami', beast responded with 'The user is asking about the weather in Miami. I've already searched for weather information using the brave web search tool and got results. Now I need to summarize this information for the user in a'",
+      "timestamp": "2026-03-19T11:37:23.869461"
+    },
+    {
+      "text": "Session wa_OWNER: user asked 'Place cursor in middle of the screen', beast responded with 'The user is asking me to summarize the result for them in a helpful way. They want me to explain what happened with the mouse_move attempts and why it failed.\n\nHowever, I notice the instructions say \"'",
+      "timestamp": "2026-03-19T12:26:27.781381"
+    },
+    {
+      "text": "Session wa_OWNER: user asked 'Strange you used to be able too?! What do I need to change?', beast responded with 'The user is asking me to summarize the result for them in a helpful way. They're confused about why I couldn't move the cursor before but now I can't. They want to know what they need to change.\n\nHowe'",
+      "timestamp": "2026-03-19T12:27:44.249195"
+    },
+    {
+      "text": "Session wa_OWNER: user asked 'Take a screen shot', beast responded with 'The user is asking me to summarize the screenshot result for them in a helpful way. This is a request for me to provide information/explanation, not to use a tool.\n\nLooking at the tool result, it says'",
+      "timestamp": "2026-03-19T12:39:01.579448"
+    },
+    {
+      "text": "Session wa_OWNER: user asked 'Move cursor to center of screen', beast responded with 'The user is asking me to move the cursor to the center of the screen. I already used the mouse_move tool and got a result showing the mouse was moved to (960, 540).\n\nNow the user wants me to summarize'",
+      "timestamp": "2026-03-19T12:39:50.191604"
+    },
+    {
+      "text": "Session cli_20260315_120830: user asked '/list', beast responded with 'The user is asking me to use the /list command, which I interpreted as wanting to list directory contents. I already called the list_dir tool and got an empty directory result. Now I need to summarize'",
+      "timestamp": "2026-03-20T10:32:43.311555"
+    },
+    {
+      "text": "Session cli_20260320_103530: user asked 'hi', beast responded with 'The user just said \"hi\" - this is a simple greeting. I don't need to use any tools for this. I should just respond naturally without any tool calls.\n\nHowever, looking at the instructions, it says \"To '",
+      "timestamp": "2026-03-20T11:05:00.363136"
+    },
+    {
+      "text": "Session wa_OWNER: user asked 'How\u2019s the weather in Norman cat Bahamas today. April 5th', beast responded with 'The user is asking me to summarize the weather search results I received. They want me to explain what I found about the weather in \"Norman cat Bahamas\" (which appears to be either Norman's Cay or Cat'",
+      "timestamp": "2026-04-05T11:03:51.658786"
+    },
+    {
+      "text": "Session wa_OWNER: user asked 'What is weather in Miami?', beast responded with 'The current weather in Miami is warm and varied across different reports, but generally falls into these categories:\n\n*   **Current Conditions:** Temperatures are reported between **77\u00b0F and 87\u00b0F**, w'",
+      "timestamp": "2026-04-11T17:27:01.884092"
+    },
+    {
+      "text": "Session cli_20260411_194739: user asked 'weather in miami', beast responded with 'The current weather in Miami varies slightly across reports, but generally indicates warm temperatures with some cloud cover:\n\n*   **Current Temperature:** Reports range from **77\u00b0F to 87\u00b0F**, with on'",
+      "timestamp": "2026-04-11T20:06:30.963377"
     }
   ]
 }
