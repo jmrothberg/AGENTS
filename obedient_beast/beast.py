@@ -224,36 +224,162 @@ def _load_local_memory() -> dict:
         return {"facts": []}
 
 
-def _save_local_memory_fact(fact: str):
+def _memory_category(text: str) -> str:
     """
-    Save a single fact to local memory. Caps at 200 facts (FIFO).
-    Called by _try_memory_save() after every conversation turn.
+    Heuristic category inference — used by smarter memory auto-save.
+    Categories: preference | project | people | decision | conversation.
+    """
+    t = text.lower()
+    if any(w in t for w in ("prefer", "like", "love", "hate", "favorite", "favourite")):
+        return "preference"
+    if any(w in t for w in ("decided", "chose", "will use", "going with", "pick")):
+        return "decision"
+    if any(w in t for w in ("project", "repo", "codebase", "build", "deploy")):
+        return "project"
+    if any(w in t for w in ("named", "is called", "works at", "@")):
+        return "people"
+    return "conversation"
+
+
+def _fact_fingerprint(text: str) -> str:
+    """Lowercase-normalized fingerprint for dedup. Strips punctuation + extra whitespace."""
+    import re
+    return re.sub(r"[^a-z0-9 ]", "", text.lower()).strip()
+
+
+def _save_local_memory_fact(fact: str, category: str | None = None):
+    """
+    Save a single fact to local memory with dedup + categorization.
+    Caps at 200 facts (FIFO). Skips if a near-duplicate exists in the
+    last 50 facts (by normalized fingerprint).
     """
     data = _load_local_memory()
-    data["facts"].append({
+    facts = data.get("facts", [])
+
+    # Dedup: skip if same fingerprint appeared in the last 50 facts
+    fp = _fact_fingerprint(fact)
+    if fp:
+        recent_fps = {
+            _fact_fingerprint(f.get("text", ""))
+            for f in facts[-50:]
+        }
+        if fp in recent_fps:
+            return  # Duplicate — don't grow memory
+
+    facts.append({
         "text": fact,
-        "timestamp": datetime.now().isoformat()
+        "timestamp": datetime.now().isoformat(),
+        "category": category or _memory_category(fact),
     })
     # Cap at 200 facts — remove oldest when full (FIFO)
-    if len(data["facts"]) > 200:
-        data["facts"] = data["facts"][-200:]
+    if len(facts) > 200:
+        facts = facts[-200:]
+    data["facts"] = facts
     MEMORY_FILE.write_text(json.dumps(data, indent=2))
+
+
+_MEM_TOKEN_RE = __import__("re").compile(r"[a-z0-9]+")
+
+
+def _tokenize(text: str) -> list[str]:
+    """Lowercase word-tokenize for BM25. Drops stopwords of length <= 2."""
+    return [t for t in _MEM_TOKEN_RE.findall(text.lower()) if len(t) > 2]
 
 
 def _search_local_memory(query: str) -> str:
     """
-    Search local memory by keyword matching. Returns matching facts as text.
-    Used as fallback when MCP memory server is unavailable.
+    Hybrid BM25 + temporal decay memory search.
+
+    Scoring (per fact):
+        score = bm25(query, fact_tokens) * exp(-age_days / 30)
+
+    BM25-lite: standard term-frequency / inverse-doc-frequency across the full
+    memory set, with k1=1.5 and b=0.75 (standard defaults). Temporal decay
+    multiplies the lexical score by a half-month half-life so recent facts
+    outrank ancient ones on ties. No external dependencies — pure stdlib.
     """
+    import math
+    from collections import Counter
+
     data = _load_local_memory()
-    query_lower = query.lower()
-    matches = [
-        f["text"] for f in data["facts"]
-        if query_lower in f["text"].lower()
-    ]
-    if matches:
-        return "\n".join(matches[-10:])  # Return last 10 matches
-    return f"No local memories found for '{query}'."
+    facts = data.get("facts", [])
+    if not facts:
+        return f"No local memories found for '{query}'."
+
+    q_tokens = _tokenize(query)
+    if not q_tokens:
+        # No searchable query — fall back to most recent 10
+        recent = "\n".join(f.get("text", "") for f in facts[-10:])
+        return recent or f"No local memories found for '{query}'."
+
+    # Build BM25 stats across all facts
+    docs = [_tokenize(f.get("text", "")) for f in facts]
+    N = len(docs)
+    avgdl = sum(len(d) for d in docs) / max(N, 1)
+    # df: number of docs each query term appears in
+    df = Counter()
+    for d in docs:
+        for t in set(q_tokens) & set(d):
+            df[t] += 1
+
+    k1, b = 1.5, 0.75
+    now = datetime.now()
+    scored = []
+    for fact, tokens in zip(facts, docs):
+        if not tokens:
+            continue
+        tf = Counter(tokens)
+        score = 0.0
+        for qt in q_tokens:
+            n_qt = df.get(qt, 0)
+            if n_qt == 0:
+                continue
+            idf = math.log((N - n_qt + 0.5) / (n_qt + 0.5) + 1)
+            f_qt = tf.get(qt, 0)
+            denom = f_qt + k1 * (1 - b + b * len(tokens) / avgdl)
+            if denom > 0:
+                score += idf * (f_qt * (k1 + 1)) / denom
+        if score <= 0:
+            continue
+        # Temporal decay: e^(-age_days / 30)
+        try:
+            ts = datetime.fromisoformat(fact.get("timestamp", ""))
+            age_days = max((now - ts).total_seconds() / 86400, 0)
+            decay = math.exp(-age_days / 30)
+        except Exception:
+            decay = 0.5  # Unknown age → medium weight
+        scored.append((score * decay, fact.get("text", "")))
+
+    if not scored:
+        return f"No local memories found for '{query}'."
+    scored.sort(key=lambda x: x[0], reverse=True)
+    top = [text for _, text in scored[:10]]
+    return "\n".join(top)
+
+
+def _extract_atomic_facts(user_input: str, response_text: str) -> list[str]:
+    """
+    Extract declarative atomic facts from a conversation turn.
+    Pulls sentences from the response that look like durable claims
+    ("the user prefers X", "the project uses Y", "I installed Z").
+    Returns a short list — empty if nothing fact-like was found.
+    """
+    import re
+    facts = []
+    # Grab sentences from response that contain fact-indicator verbs
+    sentences = re.split(r"(?<=[.!?])\s+", response_text or "")
+    indicators = (
+        "prefer", "use", "uses", "installed", "configured", "lives in",
+        "is called", "located", "decided", "chose", "named", "runs on",
+        "set to", "will use", "has a", "wants",
+    )
+    for s in sentences:
+        s = s.strip()
+        if 10 < len(s) < 200 and any(ind in s.lower() for ind in indicators):
+            facts.append(s)
+        if len(facts) >= 3:
+            break
+    return facts
 
 
 def _try_memory_save(session_id: str, user_input: str, response_text: str):
@@ -262,14 +388,27 @@ def _try_memory_save(session_id: str, user_input: str, response_text: str):
     Saves to BOTH local memory (persistent) AND MCP knowledge graph (if running).
     Local memory is the durable store; MCP graph adds richer entity/relationship
     recall during the current session but resets on restart.
+
+    Strategy: extract atomic facts from the response when possible; otherwise
+    fall back to a compact conversation snippet. Both paths go through
+    _save_local_memory_fact which dedupes + categorizes.
     """
     # Always save to local memory fallback (works offline, no MCP needed)
     from capabilities import MEMORY_DETAIL
-    if MEMORY_DETAIL == "minimal":
-        fact = f"Session {session_id}: user asked about '{user_input[:80]}'"
+
+    # Prefer atomic facts pulled from the response text
+    atomic = _extract_atomic_facts(user_input, response_text)
+    if atomic:
+        for f in atomic:
+            _save_local_memory_fact(f)
+        fact = atomic[0]  # Use first atomic fact for the MCP mirror below
     else:
-        fact = f"Session {session_id}: user asked '{user_input[:120]}', beast responded with '{response_text[:200]}'"
-    _save_local_memory_fact(fact)
+        # Fallback: compact conversation snippet (dedup handles repeats)
+        if MEMORY_DETAIL == "minimal":
+            fact = f"user asked about '{user_input[:80]}'"
+        else:
+            fact = f"user asked '{user_input[:120]}'; beast replied '{response_text[:180]}'"
+        _save_local_memory_fact(fact)
 
     # Also save to MCP memory if available (richer knowledge graph)
     if not MCP_ENABLED or _mcp_client is None:
@@ -446,6 +585,21 @@ TOOLS = [
         "params": {
             "url": "The URL to fetch (http:// or https://)",
             "method": "HTTP method: GET or POST (default: GET)"
+        }
+    },
+    # ---------------------------------------------------------------------------
+    # Sub-Agent Spawning — run an isolated Beast sub-session for a subtask
+    # ---------------------------------------------------------------------------
+    # spawn_agent creates a fresh session and runs one subtask in it, then
+    # returns just the final answer to the parent. Great for "research these
+    # 3 things and summarize" — each subtask gets a clean context window,
+    # so the parent doesn't drown in tool chatter. Sequential, not threaded.
+    {
+        "name": "spawn_agent",
+        "description": "Spawn a sub-agent in a fresh session to handle an isolated subtask. Use for parallel-feel research ('look into X while I look into Y') or to keep the main context clean. Returns only the sub-agent's final answer, not its tool calls. Sub-agent runs with reduced depth (default 3).",
+        "params": {
+            "task": "The subtask for the sub-agent to perform (a complete instruction)",
+            "depth": "Optional: max tool-chain steps for the sub-agent (default: 3, max: 10)"
         }
     },
 ]
@@ -748,6 +902,29 @@ def execute_tool(name: str, args: dict) -> str:
             except Exception as e:
                 return f"Fetch error: {e}"
 
+        # === Sub-Agent Spawning ===
+        # Runs a full agent loop in a throwaway session, returns final text.
+        # Uses a capped depth so sub-agents can't burn the whole budget.
+        elif name == "spawn_agent":
+            import uuid
+            task = args.get("task", "").strip()
+            if not task:
+                return "Error: spawn_agent needs a 'task' parameter"
+            try:
+                sub_depth = min(int(args.get("depth", 3)), 10)
+            except (TypeError, ValueError):
+                sub_depth = 3
+            sub_session = f"sub_{uuid.uuid4().hex[:8]}"
+            # Temporarily override DEPTH for the sub-run
+            import capabilities
+            prev_depth = capabilities.DEPTH
+            try:
+                capabilities.DEPTH = sub_depth
+                sub_result = run(task, session_id=sub_session)
+            finally:
+                capabilities.DEPTH = prev_depth
+            return f"[sub-agent {sub_session} result]\n{sub_result}"
+
         # === MCP Tools ===
         # Any tool name starting with "mcp_" is routed to the MCP client.
         # The naming convention is: mcp_<servername>_<toolname>
@@ -1033,12 +1210,20 @@ Currently: **{TIER_LABEL}** — depth {DEPTH} (chains up to {DEPTH} steps per re
 `/depth 3` — set how many steps I can chain (current: {DEPTH})
 `/model` — list/switch local models (hot-swap, no restart)
 `/heartbeat on|off` — toggle background task processing
+`/boot` — run workspace/BOOT.md startup routine on demand
 `/clear` — clear chat history (`/clear tasks`, `/clear memory`, `/clear all`)
 `/tools` — list all my abilities
 `/skills` — installable MCP plug-in skills
 `/more` — detailed guide with examples
 `/new` — start fresh conversation (CLI only)
 `/quit` — exit (CLI only)
+
+**✨ New powers:**
+• **Loop detection** — I bail automatically if I get stuck repeating a tool
+• **BOOT.md** — drop `workspace/BOOT.md` and I run it once a day on launch (`/boot install` to start from the example, `/boot` to rerun now)
+• **spawn_agent** — ask me to "spawn a sub-agent to research X" and I'll run it in an isolated session
+• **Smarter memory** — BM25 + temporal decay search, atomic facts, dedup, categories
+• **LLM fallback** — set `LLM_FALLBACK=claude,openai` in .env and I retry on failure
 
 **Tips:**
 • Say "remind me to..." or "later, do..." and I'll queue it up!
@@ -1072,19 +1257,21 @@ I'm an AI assistant that lives on your computer. You talk to me (here in the ter
   • Change it anytime: `/depth 3` (fewer steps = faster, simpler)
   • Current depth: {DEPTH}
 
-**My 18 Built-in Abilities:**
+**My 19 Built-in Abilities:**
   Files — read, write, edit files, list folders
   Terminal — run any command on your computer
   Screen — take screenshots, move the mouse, click, type
-  Memory — I remember things across conversations
+  Memory — I remember things across conversations (BM25 + recency)
   Web — fetch web pages and API data
   Tasks — I keep a to-do list and can work on it by myself
+  Sub-agents — spawn isolated sub-sessions for side quests
 
 **Giving Me Tasks for Later:**
   Just say things naturally:
   • "remind me to check disk space"
   • "add a task to organize my downloads"
   • "later, review the log files"
+  • "every day at 9am, check for new git commits" (recurring)
   I'll add it to my to-do list. If the heartbeat is on, I'll
   work on it automatically in the background.
 
@@ -1094,6 +1281,39 @@ I'm an AI assistant that lives on your computer. You talk to me (here in the ter
   • `/heartbeat on` — turn on autopilot
   • `/heartbeat off` — pause autopilot
   • `/heartbeat` — check if it's on or off
+
+**🚀 BOOT.md — Your Daily Startup Routine:**
+  Drop a file at `workspace/BOOT.md` and I run it once per day
+  the first time the CLI launches. Great for standing orders.
+  • `/boot install` — copy BOOT.md.example to BOOT.md (quickest way to start)
+  • `/boot` — rerun the BOOT routine on demand
+  Example BOOT.md content:
+    1. Use the shell tool to check disk space.
+    2. Recall memories tagged with today's projects.
+    3. Show me overdue tasks from the queue.
+
+**🧠 Sub-Agents (spawn_agent tool):**
+  Ask me to branch off for side quests without polluting our chat:
+  • "spawn a sub-agent to research three MLX quantization approaches and report back"
+  • "use spawn_agent to summarize the contents of ~/Downloads"
+  The sub-agent runs in its own session with a fresh context window
+  and a capped depth — I only see its final answer.
+
+**🔁 Loop Detection:**
+  If I get stuck repeating the same tool call 3 times in a row
+  (or the same error twice), I bail out automatically and tell you
+  what I was stuck on. No more burned depth budgets.
+
+**💾 Smarter Memory:**
+  • `recall_memory` uses BM25 + temporal decay — recent + relevant wins
+  • Auto-save extracts atomic facts, dedupes by fingerprint
+  • Each fact is tagged: preference / project / people / decision / conversation
+  • `/clear memory` wipes everything if you want a fresh brain
+
+**🛟 LLM Fallback Chain:**
+  Set `LLM_FALLBACK=claude,openai` in .env — if my primary backend
+  errors out mid-request, I retry with the next one using a
+  text-only history so there are no format mismatches.
 
 **Using Me in Shared Group Chats:**
   I normally stay quiet in group chats with other people.
@@ -1122,6 +1342,9 @@ I'm an AI assistant that lives on your computer. You talk to me (here in the ter
   `/depth 5` — set tool-chain depth (steps per request)
   `/model` — list local models / `/model Qwen3` to hot-swap
   `/heartbeat on|off` — toggle autopilot
+  `/boot` — run workspace/BOOT.md now
+  `/boot install` — create BOOT.md from the example template
+  `/image [path]` — attach an image to the next message
   `/new` — start fresh conversation (CLI only)
   `/quit` — exit (CLI only)"""
 
@@ -1280,6 +1503,40 @@ I'm an AI assistant that lives on your computer. You talk to me (here in the ter
             return f"❌ Task #{task_id} not found."
         tasks_file.write_text(json.dumps(data, indent=2))
         return f"🗑 Task #{task_id} removed."
+
+    # --- /boot — run workspace/BOOT.md startup routine on demand ---
+    # /boot           → run BOOT.md now
+    # /boot install   → copy BOOT.md.example → BOOT.md (quickest way to start)
+    if cmd == "/boot install":
+        boot_file = WORKSPACE / "BOOT.md"
+        example = WORKSPACE / "BOOT.md.example"
+        if boot_file.exists():
+            return f"🚀 {boot_file} already exists — edit it directly or delete it first."
+        if not example.exists():
+            return f"❌ Example file not found at {example}. Nothing to install."
+        try:
+            boot_file.write_text(example.read_text())
+            return (
+                f"🚀 Installed BOOT.md from the example template.\n"
+                f"   Edit it at: {boot_file}\n"
+                f"   Run it now with `/boot`, or it'll auto-run on your next CLI launch."
+            )
+        except Exception as e:
+            return f"❌ Failed to install BOOT.md: {e}"
+
+    if cmd == "/boot":
+        boot_file = WORKSPACE / "BOOT.md"
+        if not boot_file.exists():
+            example = WORKSPACE / "BOOT.md.example"
+            if example.exists():
+                return (
+                    f"🚀 No workspace/BOOT.md found.\n"
+                    f"   Quickest start: type `/boot install` to create one from the example template.\n"
+                    f"   Or copy it manually: cp {example} {boot_file}"
+                )
+            return "🚀 No workspace/BOOT.md found and no example template available."
+        result = _run_boot_script(session_id, llm=llm, force=True)
+        return result or "🚀 BOOT.md is empty."
 
     # --- /heartbeat — control background task processing ---
     if cmd == "/heartbeat" or cmd == "/heartbeat status":
@@ -1479,6 +1736,14 @@ I'm an AI assistant that lives on your computer. You talk to me (here in the ter
     # Tools are available on all subsequent turns if the model needs them.
     _image_first_turn = image_path is not None
 
+    # --- Loop detection state ---
+    # Track the last few (tool_name, args_fingerprint) signatures. If the same
+    # signature repeats >=3 turns in a row, we bail out to prevent the agent
+    # from burning the entire depth budget on a stuck tool call.
+    _recent_sigs: list[str] = []
+    _last_error_result: str = ""
+    _repeat_error_count: int = 0
+
     for turn in range(DEPTH):
         # Determine tools for this turn
         turn_tools = None if _image_first_turn else all_tools
@@ -1556,6 +1821,54 @@ I'm an AI assistant that lives on your computer. You talk to me (here in the ter
                 result = execute_tool(tool_call.name, tool_call.args)
                 tool_results.append((tool_call, result))
 
+            # --- Loop detection: bail if the agent is spinning ---
+            # Signature = tool name + sorted args (stable hash of the call).
+            # If the same signature repeats 3 turns in a row, OR the same
+            # error result repeats 2 turns in a row, we stop early and
+            # return a clear message instead of burning the depth budget.
+            sig_parts = []
+            err_results = []
+            for tc, res in tool_results:
+                try:
+                    arg_blob = json.dumps(tc.args, sort_keys=True, default=str)
+                except Exception:
+                    arg_blob = str(tc.args)
+                sig_parts.append(f"{tc.name}|{arg_blob}")
+                if isinstance(res, str) and res.lower().startswith(("error", "http error", "url error")):
+                    err_results.append(res[:200])
+            turn_sig = "||".join(sig_parts)
+            _recent_sigs.append(turn_sig)
+            if len(_recent_sigs) > 5:
+                _recent_sigs = _recent_sigs[-5:]
+            if len(_recent_sigs) >= 3 and _recent_sigs[-1] == _recent_sigs[-2] == _recent_sigs[-3]:
+                loop_msg = (
+                    f"🔁 Stopping — I repeated the same tool call 3 times. "
+                    f"Last call: `{tool_results[0][0].name}`. "
+                    f"Last result: {str(tool_results[0][1])[:200]}"
+                )
+                final_msg = {"role": "assistant", "content": loop_msg}
+                history.append(final_msg)
+                save_message(session_id, final_msg)
+                return loop_msg
+            if err_results:
+                joined_err = "||".join(err_results)
+                if joined_err == _last_error_result:
+                    _repeat_error_count += 1
+                else:
+                    _last_error_result = joined_err
+                    _repeat_error_count = 1
+                if _repeat_error_count >= 2:
+                    loop_msg = (
+                        f"🔁 Stopping — same error twice in a row: {err_results[0][:200]}"
+                    )
+                    final_msg = {"role": "assistant", "content": loop_msg}
+                    history.append(final_msg)
+                    save_message(session_id, final_msg)
+                    return loop_msg
+            else:
+                _repeat_error_count = 0
+                _last_error_result = ""
+
             # Add tool results in the correct format
             if llm.backend == "claude":
                 # Claude: ALL results in one user message (API requires this
@@ -1590,6 +1903,43 @@ I'm an AI assistant that lives on your computer. You talk to me (here in the ter
             return response.text
 
     return "(Max turns reached - stopping)"
+
+
+def _run_boot_script(session_id: str, llm=None, force: bool = False) -> str | None:
+    """
+    Run workspace/BOOT.md once per day on CLI launch (or on demand via /boot).
+
+    BOOT.md is a user-defined startup routine — any markdown text in that file
+    is fed to the agent as a synthetic user message prefixed with [BOOT], so
+    the LLM executes whatever tools the user wants on launch. A sentinel file
+    workspace/.boot_done_YYYYMMDD.flag prevents re-running on /new within the
+    same day. Pass force=True from /boot to bypass the sentinel.
+
+    Returns the agent's response, or None if BOOT.md is missing / already ran.
+    """
+    boot_file = WORKSPACE / "BOOT.md"
+    if not boot_file.exists():
+        return None
+    today = datetime.now().strftime("%Y%m%d")
+    sentinel = WORKSPACE / f".boot_done_{today}.flag"
+    if sentinel.exists() and not force:
+        return None
+    try:
+        boot_text = boot_file.read_text().strip()
+    except Exception as e:
+        return f"[BOOT] Failed to read BOOT.md: {e}"
+    if not boot_text:
+        return None
+    # Clean up older sentinels from previous days
+    try:
+        for f in WORKSPACE.glob(".boot_done_*.flag"):
+            if f.name != sentinel.name:
+                f.unlink()
+    except Exception:
+        pass
+    sentinel.write_text(datetime.now().isoformat())
+    boot_msg = f"[BOOT] Execute this startup routine:\n\n{boot_text}"
+    return run(boot_msg, session_id=session_id, llm=llm)
 
 
 def _get_startup_memory_context() -> str:
@@ -1638,12 +1988,17 @@ def cli():
     if MCP_ENABLED:
         print(f"   MCP: enabled")
     print("=" * 60)
-    print("Commands: /help, /more, /status, /depth, /new, /clear, /quit, /tools, /image, /claude, /openai, /lfm, /model")
+    print("Commands: /help, /more, /status, /depth, /new, /clear, /quit, /tools, /image, /boot, /claude, /openai, /lfm, /model")
     print("=" * 60 + "\n")
 
     session_id = f"cli_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
     llm = get_llm()
     pending_image = None  # Set by /image command, used on next message
+
+    # --- BOOT.md: run the user's startup routine (once per day on launch) ---
+    boot_result = _run_boot_script(session_id, llm=llm, force=False)
+    if boot_result:
+        print(f"🚀 BOOT.md executed:\n{boot_result}\n")
 
     while True:
         try:

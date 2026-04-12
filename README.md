@@ -1,6 +1,8 @@
-# Local LLM Inference Tools
+# Local LLM Inference Tools + Obedient Beast Agent
 
 **Written by Jonathan M Rothberg**
+
+> **Looking for the agent?** See [`obedient_beast/README.md`](obedient_beast/README.md) — that's a minimal, single-file agentic assistant with 19 built-in tools, autonomous task queue, persistent memory, WhatsApp/CLI/HTTP interfaces, and a runtime-extensible MCP plug-in system. This top-level README documents the **local LLM inference servers** that the agent can talk to.
 
 Local inference scripts that **dynamically discover and serve any model** in your model directories. Supports both:
 - **macOS** (Apple Silicon) using MLX for optimized inference
@@ -925,16 +927,22 @@ Beast normally stays quiet in shared group chats (groups with other people). To 
 | Feature | OpenClaw | Obedient Beast |
 |---------|----------|----------------|
 | MCP Support | ❌ Custom only | ✅ Native MCP with 3-tier catalog (11 servers) |
-| Tool Ecosystem | Closed | Open (any MCP + 18 built-in) |
+| Tool Ecosystem | Closed | Open (any MCP + 19 built-in) |
 | Computer Control | Via plugins | Built-in (screenshot, mouse, keyboard) |
-| Autonomous Tasks | Cron/webhooks | Heartbeat + task queue |
-| Persistent Memory | Via plugins | Built-in (MCP graph + local JSON fallback) |
+| Autonomous Tasks | Cron/webhooks | Heartbeat + task queue + scheduled/recurring |
+| Persistent Memory | Via plugins | Built-in (BM25 + temporal decay, MCP graph optional) |
 | Web/HTTP Fetching | Via plugins | Built-in `fetch_url` + MCP fetch server |
 | Backend Switching | ❌ | `/claude` `/openai` `/lfm` live |
+| LLM Fallback Chain | ❌ | `LLM_FALLBACK=claude,openai` — retries on failure |
 | Depth Control | ❌ | `/depth N` — tune tool-chain steps at runtime |
-| MCP Tier Organization | ❌ | 3-tier catalog (Essential/Extended/Cloud) |
+| Loop Detection | ❌ | ✅ Bails on repeated tool calls / errors |
+| Sub-Agent Spawning | ❌ | ✅ `spawn_agent` tool for isolated subtasks |
+| Startup Routines | Cron | ✅ `workspace/BOOT.md` — daily standing orders |
+| Smart Memory Save | ❌ | ✅ Atomic facts + dedupe + categorization |
+| Context Trimming | ❌ | ✅ Auto-summarizes dropped turns |
+| Vision Input | ❌ | `/image` (drops gracefully to non-VLM models) |
 | Auto Memory Recall | ❌ | ✅ At session start |
-| Codebase Size | 150k+ lines | ~2.7k lines (heavily commented) |
+| Codebase Size | 150k+ lines | ~2.9k lines (heavily commented) |
 | Local-first | ✅ | ✅ |
 | Setup | Complex | One command |
 

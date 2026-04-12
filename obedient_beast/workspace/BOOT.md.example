@@ -1,0 +1,14 @@
+# Beast Startup Routine
+
+Copy this file to `BOOT.md` (same directory) to activate it.
+Beast runs this once per day on the first CLI launch, and on demand via `/boot`.
+Everything in this file is fed to the agent as a single instruction — any tools are allowed.
+
+## Standing orders for today
+
+1. Use the shell tool to check disk space on the main drive. If any volume is above 90% full, warn me.
+2. Recall anything in memory tagged with today's projects or pending decisions, and summarize it in 3 bullets.
+3. Show me the current task queue (`/tasks` behavior via the tools) and highlight anything overdue.
+4. If it's Monday, remind me to review last week's done items.
+
+Keep the summary under 200 words — this runs every morning and I don't want noise.
