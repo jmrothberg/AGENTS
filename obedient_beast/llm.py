@@ -383,23 +383,50 @@ class LLM:
                             return s[idx:i + 1]
                 return None
 
+            def _repair_json(blob: str) -> str:
+                """Fix actual newlines/tabs inside JSON strings → escape sequences."""
+                result = []
+                in_str = False
+                escape = False
+                for c in blob:
+                    if escape:
+                        result.append(c)
+                        escape = False
+                        continue
+                    if c == '\\':
+                        result.append(c)
+                        escape = True
+                        continue
+                    if c == '"':
+                        in_str = not in_str
+                        result.append(c)
+                        continue
+                    if in_str:
+                        if c == '\n': result.append('\\n'); continue
+                        if c == '\r': result.append('\\r'); continue
+                        if c == '\t': result.append('\\t'); continue
+                    result.append(c)
+                return ''.join(result)
+
             def _parse_tool_json(json_str: str) -> ToolCall | None:
-                """Parse a tool call JSON blob into a ToolCall."""
-                try:
-                    data = json.loads(json_str)
-                    if "name" not in data:
-                        return None
-                    # Models use "args" or "arguments" — accept both
-                    args = data.get("args", data.get("arguments", {}))
-                    if isinstance(args, str):
-                        args = json.loads(args)
-                    return ToolCall(
-                        id=f"call_{uuid.uuid4().hex[:8]}",
-                        name=data["name"],
-                        args=args
-                    )
-                except (json.JSONDecodeError, TypeError, KeyError):
-                    return None
+                """Parse a tool call JSON blob into a ToolCall, with repair."""
+                for attempt_str in [json_str, _repair_json(json_str)]:
+                    try:
+                        data = json.loads(attempt_str)
+                        if "name" not in data:
+                            return None
+                        # Models use "args" or "arguments" — accept both
+                        args = data.get("args", data.get("arguments", {}))
+                        if isinstance(args, str):
+                            args = json.loads(args)
+                        return ToolCall(
+                            id=f"call_{uuid.uuid4().hex[:8]}",
+                            name=data["name"],
+                            args=args
+                        )
+                    except (json.JSONDecodeError, TypeError, KeyError):
+                        continue
+                return None
 
             # Pattern A: Fenced code blocks — ```tool or ```tool_call
             fence_pattern = r'```tool(?:_call)?\s*\n'

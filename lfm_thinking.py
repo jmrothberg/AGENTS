@@ -439,12 +439,13 @@ def run_server_mode(model, tokenizer, processor, model_name, model_type, host="0
 
     def parse_tool_calls(text):
         """
-        Parse tool calls from model output using brace-depth matching.
+        Parse tool calls from model output using brace-depth matching
+        with JSON repair for common model output issues.
 
-        Regex with .*? or [^}]+ CANNOT handle nested braces inside JSON
-        string values (e.g. HTML content with } characters). We use
-        brace-depth matching that tracks string escaping to reliably
-        extract the full JSON blob regardless of content.
+        Models often produce invalid JSON in tool calls:
+        - Actual newlines inside strings (should be \\n)
+        - Unescaped control characters
+        We handle these with a repair step after extraction.
         """
         tool_calls = []
 
@@ -477,6 +478,40 @@ def run_server_mode(model, tokenizer, processor, model_name, model_type, host="0
                         return s[idx:i + 1], i + 1
             return None, -1
 
+        def _repair_json(blob):
+            """Fix common JSON issues from model output:
+            - Replace actual newlines/tabs/returns inside strings with escape sequences
+            - This makes invalid model JSON parseable by json.loads()
+            """
+            result = []
+            in_str = False
+            escape = False
+            for c in blob:
+                if escape:
+                    result.append(c)
+                    escape = False
+                    continue
+                if c == '\\':
+                    result.append(c)
+                    escape = True
+                    continue
+                if c == '"':
+                    in_str = not in_str
+                    result.append(c)
+                    continue
+                if in_str:
+                    if c == '\n':
+                        result.append('\\n')
+                        continue
+                    if c == '\r':
+                        result.append('\\r')
+                        continue
+                    if c == '\t':
+                        result.append('\\t')
+                        continue
+                result.append(c)
+            return ''.join(result)
+
         def try_add(data):
             """Add tool call if it has a name and isn't a duplicate."""
             name = data.get("name")
@@ -500,35 +535,48 @@ def run_server_mode(model, tokenizer, processor, model_name, model_type, host="0
 
         seen = set()
 
+        def _try_parse(blob, label=""):
+            """Try json.loads, then repair + retry. Returns parsed data or None."""
+            if not blob:
+                return None
+            try:
+                return json.loads(blob)
+            except json.JSONDecodeError as e:
+                print(f"[DEBUG] {label} json.loads failed: {e}")
+                # Repair: fix newlines/tabs inside strings
+                repaired = _repair_json(blob)
+                try:
+                    data = json.loads(repaired)
+                    print(f"[DEBUG] {label} json.loads succeeded after repair")
+                    return data
+                except json.JSONDecodeError as e2:
+                    print(f"[DEBUG] {label} json.loads STILL failed after repair: {e2}")
+                    print(f"[DEBUG] {label} blob[:200] = {blob[:200]}")
+                    return None
+
         # Pattern A: ```tool_call or ```tool fenced blocks
         for m in re.finditer(r'```tool(?:_call)?\s*\n', text):
             blob, _ = _extract_json(text, m.end())
-            if blob:
-                try:
-                    data = json.loads(blob)
-                    try_add(data)
-                except json.JSONDecodeError:
-                    pass
+            print(f"[DEBUG] Pattern A: fence at {m.start()}, blob={'found '+str(len(blob))+' chars' if blob else 'None'}")
+            data = _try_parse(blob, "Pattern A")
+            if data and "name" in data:
+                try_add(data)
 
         # Pattern B: <tool_call>{...}</tool_call> (Qwen3)
-        for m in re.finditer(r'<tool_call>\s*', text):
-            blob, _ = _extract_json(text, m.end())
-            if blob:
-                try:
-                    data = json.loads(blob)
+        if not tool_calls:
+            for m in re.finditer(r'<tool_call>\s*', text):
+                blob, _ = _extract_json(text, m.end())
+                data = _try_parse(blob, "Pattern B")
+                if data and "name" in data:
                     try_add(data)
-                except json.JSONDecodeError:
-                    pass
 
         # Pattern C: Raw JSON with "name" key (last resort)
         if not tool_calls:
             blob, _ = _extract_json(text)
             if blob and '"name"' in blob:
-                try:
-                    data = json.loads(blob)
+                data = _try_parse(blob, "Pattern C")
+                if data and "name" in data:
                     try_add(data)
-                except json.JSONDecodeError:
-                    pass
 
         # Only return first tool call to prevent loops
         return tool_calls[:1]
@@ -903,7 +951,8 @@ def run_server_mode(model, tokenizer, processor, model_name, model_type, host="0
 
             # Parse tool calls from response if tools were requested
             tool_calls = []
-            print(f"[DEBUG] Full response:\n{response_text[:500] if response_text else 'empty'}")
+            resp_len = len(response_text) if response_text else 0
+            print(f"[DEBUG] Full response ({resp_len} chars):\n{response_text if response_text else 'empty'}")
             if request.tools:
                 tool_calls = parse_tool_calls(response_text)
                 print(f"[DEBUG] Tool calls found: {len(tool_calls)}")
