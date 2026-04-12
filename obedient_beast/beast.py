@@ -717,6 +717,31 @@ TOOLS = [
         "description": "Close the persistent browser context. Cookies remain on disk for the next session.",
         "params": {}
     },
+    # ---------------------------------------------------------------------------
+    # Sandbox — run generated code in an isolated workspace directory
+    # ---------------------------------------------------------------------------
+    # run_python: writes a script to workspace/sandbox/py_<ts>/, runs it with
+    # Beast's own Python, captures stdout/stderr, and lists any files created.
+    # run_html: writes an HTML file to workspace/sandbox/html_<ts>/ and opens
+    # it in the default browser via stdlib webbrowser.open().
+    {
+        "name": "run_python",
+        "description": "Run a Python script in an isolated sandbox directory. Returns stdout, stderr, and a list of any files the script created (plots, CSVs, etc.). Uses Beast's own Python/venv so installed packages (numpy, matplotlib, etc.) are available.",
+        "params": {
+            "code": "The Python source code to run",
+            "timeout": "Optional: max seconds to wait (default 30, max 120)",
+            "filename": "Optional: script filename (default: script.py)"
+        }
+    },
+    {
+        "name": "run_html",
+        "description": "Create an HTML/CSS/JavaScript page and open it in the default browser. Perfect for visualizations, interactive demos, games, dashboards, charts, or anything visual. The file persists in workspace/sandbox/ so the user can revisit it.",
+        "params": {
+            "html": "The full HTML source (including <html>, <head>, <body>)",
+            "filename": "Optional: filename (default: index.html)",
+            "open_browser": "Optional: 'false' to skip opening the browser (default: true)"
+        }
+    },
 ]
 
 # Now that TOOLS is defined, compose the full system prompt (SOUL + AGENTS +
@@ -1139,6 +1164,72 @@ def execute_tool(name: str, args: dict) -> str:
             except BrowserUnavailable as exc:
                 return f"Error: {exc}"
 
+        # === Sandbox Tools ===
+        # run_python: isolated script execution in workspace/sandbox/py_<ts>/
+        # run_html:   write + open HTML in workspace/sandbox/html_<ts>/
+        elif name == "run_python":
+            code = args.get("code", "").strip()
+            if not code:
+                return "Error: run_python requires a 'code' parameter"
+            timeout = min(int(args.get("timeout", 30)), 120)
+            filename = args.get("filename", "script.py")
+            ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+            sandbox_dir = WORKSPACE / "sandbox" / f"py_{ts}"
+            sandbox_dir.mkdir(parents=True, exist_ok=True)
+            script_path = sandbox_dir / filename
+            script_path.write_text(code)
+            try:
+                result = subprocess.run(
+                    [sys.executable, str(script_path)],
+                    capture_output=True, text=True,
+                    timeout=timeout,
+                    cwd=str(sandbox_dir)
+                )
+                output = result.stdout
+                if result.stderr:
+                    output += f"\n[stderr]:\n{result.stderr}"
+                if result.returncode != 0:
+                    output += f"\n[exit code]: {result.returncode}"
+                output = output or "(no output)"
+            except subprocess.TimeoutExpired:
+                output = f"Error: Script timed out after {timeout}s"
+            # List files the script created (excluding the script itself)
+            created = [
+                f.name for f in sandbox_dir.iterdir()
+                if f.name != filename
+            ]
+            if created:
+                output += f"\n\n[Created files in {sandbox_dir}]:\n"
+                output += "\n".join(f"  {f}" for f in sorted(created))
+                # Auto-queue the first image for WhatsApp delivery
+                for f in sorted(created):
+                    if f.lower().endswith((".png", ".jpg", ".jpeg", ".gif", ".svg")):
+                        set_pending_image(str(sandbox_dir / f))
+                        output += f"\n(Image {f} queued for WhatsApp)"
+                        break
+            return output
+
+        elif name == "run_html":
+            html = args.get("html", "").strip()
+            if not html:
+                return "Error: run_html requires an 'html' parameter"
+            filename = args.get("filename", "index.html")
+            open_browser = str(args.get("open_browser", "true")).lower() != "false"
+            ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+            sandbox_dir = WORKSPACE / "sandbox" / f"html_{ts}"
+            sandbox_dir.mkdir(parents=True, exist_ok=True)
+            filepath = sandbox_dir / filename
+            filepath.write_text(html)
+            file_url = f"file://{filepath.resolve()}"
+            if open_browser:
+                import webbrowser
+                webbrowser.open(file_url)
+            return (
+                f"HTML page saved to {filepath}\n"
+                f"URL: {file_url}\n"
+                f"{'Opened in default browser.' if open_browser else 'Browser not opened (open_browser=false).'}"
+            )
+
         # === MCP Tools ===
         # Any tool name starting with "mcp_" is routed to the MCP client.
         # The naming convention is: mcp_<servername>_<toolname>
@@ -1405,6 +1496,7 @@ Just talk to me like a person. I can:
 • Remember things for later ("remind me to call the dentist")
 • Search the web (when connected to Brave Search)
 • Fetch data from websites and APIs
+• Write and run Python scripts or HTML/JS pages in a sandbox
 • Work on tasks by myself in the background
 
 **Two brain modes:**
@@ -1427,6 +1519,7 @@ Currently: **{TIER_LABEL}** — depth {DEPTH} (chains up to {DEPTH} steps per re
 `/boot` — run workspace/BOOT.md startup routine on demand
 `/clear` — clear chat history (`/clear tasks`, `/clear memory`, `/clear all`)
 `/tools` — list all my abilities
+`/sandbox` — list recent sandbox runs (Python scripts, HTML pages)
 `/skills` — installable MCP plug-in skills
 `/more` — detailed guide with examples
 `/new` — start fresh conversation (CLI only)
@@ -1529,6 +1622,24 @@ I'm an AI assistant that lives on your computer. You talk to me (here in the ter
   errors out mid-request, I retry with the next one using a
   text-only history so there are no format mismatches.
 
+**📦 Sandbox — Run Generated Code:**
+  Ask me to write and run code. I handle the full cycle:
+  write → execute → return results.
+
+  **Python:** "Write a Python script that calculates pi to 100 digits"
+    → I use `run_python` to create a sandbox dir, run the script,
+      and show you stdout. If the script creates a plot (.png),
+      I queue it for WhatsApp delivery automatically.
+
+  **HTML/JS:** "Create a bouncing ball animation" or "make a tic-tac-toe game"
+    → I use `run_html` to write the HTML and open it in your browser.
+      The file stays in `workspace/sandbox/` so you can revisit it.
+
+  **Tips:**
+    • `/sandbox` — list recent runs with their output files
+    • Scripts run with Beast's Python, so installed packages work
+    • HTML pages open in your default browser automatically
+
 **Using Me in Shared Group Chats:**
   I normally stay quiet in group chats with other people.
   To summon me for one message, start it with **@beast**:
@@ -1549,6 +1660,7 @@ I'm an AI assistant that lives on your computer. You talk to me (here in the ter
   `/drop 3` — delete task #3
   `/clear` — clear history (`/clear tasks`, `/clear memory`, `/clear all`)
   `/tools` — list all my abilities
+  `/sandbox` — list recent sandbox runs
   `/skills` — list installable MCP skills
   `/claude` — switch to Cloud (Claude)
   `/openai` — switch to Cloud (OpenAI)
@@ -1751,6 +1863,22 @@ I'm an AI assistant that lives on your computer. You talk to me (here in the ter
             return "🚀 No workspace/BOOT.md found and no example template available."
         result = _run_boot_script(session_id, llm=llm, force=True)
         return result or "🚀 BOOT.md is empty."
+
+    # --- /sandbox — list recent sandbox outputs ---
+    if cmd == "/sandbox":
+        sandbox_dir = WORKSPACE / "sandbox"
+        if not sandbox_dir.exists() or not any(sandbox_dir.iterdir()):
+            return "📦 No sandbox runs yet. Ask me to write and run a Python script or create an HTML page!"
+        entries = sorted(sandbox_dir.iterdir(), key=lambda p: p.stat().st_mtime, reverse=True)[:15]
+        lines = ["📦 **Recent sandbox runs:**"]
+        for entry in entries:
+            if not entry.is_dir():
+                continue
+            kind = "🐍 Python" if entry.name.startswith("py_") else "🌐 HTML" if entry.name.startswith("html_") else "📁"
+            files = [f.name for f in entry.iterdir()]
+            lines.append(f"  {kind} `{entry.name}/` — {', '.join(files[:5])}")
+        lines.append(f"\nAll files in: {sandbox_dir}")
+        return "\n".join(lines)
 
     # --- /heartbeat — control background task processing ---
     if cmd == "/heartbeat" or cmd == "/heartbeat status":
