@@ -257,14 +257,23 @@ class LLM:
         import re
         import uuid
 
-        # Build tool description for the prompt (text-based, works with any model)
+        # Build tool description for the prompt (text-based, works with any model).
+        # NOTE: lfm_thinking.py adds its own detailed tool prompt with priority
+        # ordering, so we keep this short to avoid duplication/confusion.
+        # The format MUST say ```tool_call (not ```tool) to match the server-side
+        # prompt and parser.
         tool_prompt = ""
         if tools:
-            tool_prompt = "\n\n## Available Tools\nYou can call tools by outputting JSON in this exact format:\n```tool\n{\"name\": \"tool_name\", \"args\": {\"param\": \"value\"}}\n```\n\nAvailable tools:\n"
-            for t in tools:
-                params = ", ".join(t.get("params", {}).keys())
-                tool_prompt += f"- **{t['name']}**({params}): {t['description']}\n"
-            tool_prompt += "\nIf you need to use a tool, output the tool call JSON. After the tool result, continue your response. Keep responses SHORT."
+            tool_prompt = (
+                "\n\nYou have tools available. To use one, output ONLY a tool_call block:\n"
+                "```tool_call\n"
+                "{\"name\": \"tool_name\", \"arguments\": {\"param\": \"value\"}}\n"
+                "```\n"
+                "CRITICAL RULES:\n"
+                "- For Python code: use run_python (put code in the 'code' argument). NEVER output ```python blocks.\n"
+                "- For HTML pages: use run_html (put HTML in the 'html' argument). NEVER use write_file.\n"
+                "- ALWAYS use a tool when asked to do something. Never just describe what you would do.\n"
+            )
 
         # Prepend system message with tool info injected
         msgs = messages.copy()

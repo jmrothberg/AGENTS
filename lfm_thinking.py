@@ -468,7 +468,11 @@ def run_server_mode(model, tokenizer, processor, model_name, model_type, host="0
             lines.append(f"\n**Other tools ({len(other_names)}):** " + ", ".join(other_names[:20]))
             if len(other_names) > 20:
                 lines.append(f"  ...and {len(other_names) - 20} more")
-        lines.append("\nYou MUST call a tool when the user asks you to do something. Never just describe what you would do — actually do it.")
+        lines.append("\nRULES:")
+        lines.append("- You MUST call a tool when the user asks you to do something. Never just describe what you would do.")
+        lines.append("- For Python code: ALWAYS use run_python. Put the code in the 'code' argument. NEVER output ```python blocks — the user cannot run those.")
+        lines.append("- For HTML/JS: ALWAYS use run_html. Put the HTML in the 'html' argument. NEVER use write_file.")
+        lines.append("- Output ONLY the ```tool_call block. No explanation before or after.")
 
         return "\n".join(lines)
 
