@@ -109,8 +109,8 @@ Beast can generate a program and immediately run it. Two tools handle the full c
 | `run_python` → creates `.png` plot | ✅ file listed | ✅ file path shown | ✅ **image auto-sent** |
 | `run_html` → HTML page | ✅ file path | ✅ opens in browser | ✅ **auto-screenshot sent** |
 
-- **Python scripts** run in `workspace/sandbox/py_<timestamp>/` with Beast's own venv (numpy, matplotlib, etc. available). Timeout: 30s default, 120s max.
-- **HTML pages** are saved to `workspace/sandbox/html_<timestamp>/`, opened in the default browser, AND auto-screenshotted via Playwright so WhatsApp users see a rendered preview.
+- **Python scripts** run in `workspace/Generated Code/py_<timestamp>/` with Beast's own venv (numpy, matplotlib, etc. available). Timeout: 30s default, 120s max.
+- **HTML pages** are saved to `workspace/Generated Code/html_<timestamp>/`, opened in the default browser, AND auto-screenshotted via Playwright so WhatsApp users see a rendered preview.
 - `/sandbox` lists recent runs with their output files.
 
 ## Architecture

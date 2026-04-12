@@ -136,6 +136,32 @@ SESSIONS_DIR.mkdir(exist_ok=True)
 # Capped at 200 entries (FIFO) to prevent unbounded growth.
 MEMORY_FILE = WORKSPACE / "memory.json"
 
+# Sandbox activity log — append-only log of every run_python/run_html execution.
+# Easy to review what Beast generated and ran, without parsing LLM debug output.
+SANDBOX_DIR = WORKSPACE / "Generated Code"
+SANDBOX_LOG = SANDBOX_DIR / "activity.log"
+
+
+def _sandbox_log(tool: str, folder: str, code_snippet: str, result_snippet: str):
+    """Append a timestamped entry to the sandbox activity log."""
+    try:
+        SANDBOX_DIR.mkdir(parents=True, exist_ok=True)
+        ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        entry = (
+            f"\n{'='*60}\n"
+            f"[{ts}] {tool}\n"
+            f"Folder: {folder}\n"
+            f"--- Code (first 500 chars) ---\n"
+            f"{code_snippet[:500]}\n"
+            f"--- Result (first 500 chars) ---\n"
+            f"{result_snippet[:500]}\n"
+        )
+        with open(SANDBOX_LOG, "a") as f:
+            f.write(entry)
+    except Exception:
+        pass  # Never block the response for a log failure
+
+
 # Pending image to send with next response (for WhatsApp image sending).
 # When the screenshot tool runs, it sets this path so server.py can
 # include the image in the WhatsApp reply.
@@ -720,13 +746,13 @@ TOOLS = [
     # ---------------------------------------------------------------------------
     # Sandbox — run generated code in an isolated workspace directory
     # ---------------------------------------------------------------------------
-    # run_python: writes a script to workspace/sandbox/py_<ts>/, runs it with
+    # run_python: writes a script to workspace/Generated Code/py_<ts>/, runs it with
     # Beast's own Python, captures stdout/stderr, and lists any files created.
-    # run_html: writes an HTML file to workspace/sandbox/html_<ts>/ and opens
+    # run_html: writes an HTML file to workspace/Generated Code/html_<ts>/ and opens
     # it in the default browser via stdlib webbrowser.open().
     {
         "name": "run_python",
-        "description": "Run a Python script in an isolated sandbox directory. Returns stdout, stderr, and a list of any files the script created (plots, CSVs, etc.). Uses Beast's own Python/venv so installed packages (numpy, matplotlib, etc.) are available.",
+        "description": "PREFERRED over shell for running Python code. Run a Python script in an isolated sandbox directory. Returns stdout, stderr, and a list of any files the script created (plots, CSVs, etc.). Uses Beast's own Python/venv so installed packages (numpy, matplotlib, etc.) are available. Always use this instead of shell+echo or write_file+shell for Python scripts.",
         "params": {
             "code": "The Python source code to run",
             "timeout": "Optional: max seconds to wait (default 30, max 120)",
@@ -735,7 +761,7 @@ TOOLS = [
     },
     {
         "name": "run_html",
-        "description": "Create an HTML/CSS/JavaScript page and open it in the default browser. Perfect for visualizations, interactive demos, games, dashboards, charts, or anything visual. The file persists in workspace/sandbox/ so the user can revisit it.",
+        "description": "PREFERRED over write_file for HTML pages. Create an HTML/CSS/JavaScript page, open it in the browser, AND auto-screenshot it for WhatsApp delivery. Perfect for visualizations, interactive demos, games, dashboards, charts. Always use this instead of write_file for HTML content.",
         "params": {
             "html": "The full HTML source (including <html>, <head>, <body>)",
             "filename": "Optional: filename (default: index.html)",
@@ -1165,8 +1191,10 @@ def execute_tool(name: str, args: dict) -> str:
                 return f"Error: {exc}"
 
         # === Sandbox Tools ===
-        # run_python: isolated script execution in workspace/sandbox/py_<ts>/
-        # run_html:   write + open HTML in workspace/sandbox/html_<ts>/
+        # run_python: isolated script execution in workspace/Generated Code/py_<ts>/
+        # run_html:   write + open HTML in workspace/Generated Code/html_<ts>/
+        # Activity log: workspace/Generated Code/activity.log — append-only,
+        # one timestamped entry per run so users can review what happened.
         elif name == "run_python":
             code = args.get("code", "").strip()
             if not code:
@@ -1174,7 +1202,7 @@ def execute_tool(name: str, args: dict) -> str:
             timeout = min(int(args.get("timeout", 30)), 120)
             filename = args.get("filename", "script.py")
             ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-            sandbox_dir = WORKSPACE / "sandbox" / f"py_{ts}"
+            sandbox_dir = WORKSPACE / "Generated Code" / f"py_{ts}"
             sandbox_dir.mkdir(parents=True, exist_ok=True)
             script_path = sandbox_dir / filename
             script_path.write_text(code)
@@ -1207,6 +1235,7 @@ def execute_tool(name: str, args: dict) -> str:
                         set_pending_image(str(sandbox_dir / f))
                         output += f"\n(Image {f} queued for WhatsApp)"
                         break
+            _sandbox_log("run_python", str(sandbox_dir), code, output)
             return output
 
         elif name == "run_html":
@@ -1216,7 +1245,7 @@ def execute_tool(name: str, args: dict) -> str:
             filename = args.get("filename", "index.html")
             open_browser = str(args.get("open_browser", "true")).lower() != "false"
             ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-            sandbox_dir = WORKSPACE / "sandbox" / f"html_{ts}"
+            sandbox_dir = WORKSPACE / "Generated Code" / f"html_{ts}"
             sandbox_dir.mkdir(parents=True, exist_ok=True)
             filepath = sandbox_dir / filename
             filepath.write_text(html)
@@ -1243,7 +1272,9 @@ def execute_tool(name: str, args: dict) -> str:
             except Exception as e:
                 # Browser not available — no screenshot, still works
                 result_lines.append(f"(No screenshot — browser not available: {e})")
-            return "\n".join(result_lines)
+            final_result = "\n".join(result_lines)
+            _sandbox_log("run_html", str(sandbox_dir), html, final_result)
+            return final_result
 
         # === MCP Tools ===
         # Any tool name starting with "mcp_" is routed to the MCP client.
@@ -1662,7 +1693,7 @@ I'm an AI assistant that lives on your computer. You talk to me (here in the ter
     • `/sandbox` — list recent runs with their output files
     • Scripts run with Beast's Python, so installed packages work
     • HTML pages open in your default browser AND get screenshotted
-    • All sandbox files persist in `workspace/sandbox/`
+    • All sandbox files persist in `workspace/Generated Code/`
 
 **Using Me in Shared Group Chats:**
   I normally stay quiet in group chats with other people.
@@ -1889,8 +1920,21 @@ I'm an AI assistant that lives on your computer. You talk to me (here in the ter
         return result or "🚀 BOOT.md is empty."
 
     # --- /sandbox — list recent sandbox outputs ---
+    # --- /sandbox log — show the activity log (what was run, what happened) ---
+    if cmd == "/sandbox log":
+        if not SANDBOX_LOG.exists():
+            return "📦 No sandbox activity yet. Ask me to run a Python script or create an HTML page!"
+        try:
+            log_text = SANDBOX_LOG.read_text()
+            # Show the last 3000 chars (most recent runs)
+            if len(log_text) > 3000:
+                log_text = "...(older entries trimmed)...\n" + log_text[-3000:]
+            return f"📦 **Sandbox Activity Log:**\n```\n{log_text}\n```"
+        except Exception as e:
+            return f"❌ Error reading sandbox log: {e}"
+
     if cmd == "/sandbox":
-        sandbox_dir = WORKSPACE / "sandbox"
+        sandbox_dir = WORKSPACE / "Generated Code"
         if not sandbox_dir.exists() or not any(sandbox_dir.iterdir()):
             return "📦 No sandbox runs yet. Ask me to write and run a Python script or create an HTML page!"
         entries = sorted(sandbox_dir.iterdir(), key=lambda p: p.stat().st_mtime, reverse=True)[:15]
@@ -1902,6 +1946,7 @@ I'm an AI assistant that lives on your computer. You talk to me (here in the ter
             files = [f.name for f in entry.iterdir()]
             lines.append(f"  {kind} `{entry.name}/` — {', '.join(files[:5])}")
         lines.append(f"\nAll files in: {sandbox_dir}")
+        lines.append("Tip: `/sandbox log` for detailed activity log")
         return "\n".join(lines)
 
     # --- /heartbeat — control background task processing ---
