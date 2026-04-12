@@ -730,9 +730,15 @@ def run_server_mode(model, tokenizer, processor, model_name, model_type, host="0
         else:
             prompt = user_message
 
+        # Model-specific sampling: Gemma 4 needs temp=1.0, top_p=0.95, top_k=64
+        stream_kwargs = {"max_tokens": max_tokens}
+        if "gemma" in state["model_name"].lower():
+            from mlx_lm.sample_utils import make_sampler
+            stream_kwargs["sampler"] = make_sampler(1.0, top_p=0.95, top_k=64)
+
         # Stream tokens using mlx_lm's stream_generate
         for response in stream_generate(
-            state["model"], state["tokenizer"], prompt=prompt, max_tokens=max_tokens
+            state["model"], state["tokenizer"], prompt=prompt, **stream_kwargs
         ):
             # response.text contains the next text segment (delta)
             if response.text:
@@ -938,10 +944,22 @@ def run_server_mode(model, tokenizer, processor, model_name, model_type, host="0
                     # Fallback: concatenate system + user
                     prompt = (system_message + "\n\n" if system_message else "") + user_message
 
+                # Model-specific generation defaults
+                gen_kwargs = {"max_tokens": max_tokens, "verbose": False}
+                is_gemma = "gemma" in state["model_name"].lower()
+                if is_gemma:
+                    # Gemma 4 recommended: temperature=1.0, top_p=0.95, top_k=64
+                    from mlx_lm.sample_utils import make_sampler
+                    _temp = request.temperature if request.temperature is not None else 1.0
+                    gen_kwargs["sampler"] = make_sampler(_temp, top_p=0.95, top_k=64)
+                    print(f"[Gemma] Using temp={_temp}, top_p=0.95, top_k=64")
+                else:
+                    if request.temperature is not None:
+                        gen_kwargs["temp"] = request.temperature
+
                 response_text = lm_generate(
                     state["model"], state["tokenizer"], prompt=prompt,
-                    max_tokens=max_tokens,
-                    verbose=False
+                    **gen_kwargs
                 )
 
             elif IS_MACOS and MLX_VLM_AVAILABLE and state["model_type"] == "vision":
@@ -1553,7 +1571,12 @@ while switch_model:
                     else:
                         prompt = user_input
                     
-                    response = lm_generate(model, tokenizer, prompt=prompt, max_tokens=15120, verbose=True)
+                    # Gemma 4 recommended: temperature=1.0, top_p=0.95, top_k=64
+                    interactive_kwargs = {"max_tokens": 15120, "verbose": True}
+                    if "gemma" in model_name.lower():
+                        from mlx_lm.sample_utils import make_sampler
+                        interactive_kwargs["sampler"] = make_sampler(1.0, top_p=0.95, top_k=64)
+                    response = lm_generate(model, tokenizer, prompt=prompt, **interactive_kwargs)
                     
                     # TTS: speak the response
                     if TTS_ENABLED:
