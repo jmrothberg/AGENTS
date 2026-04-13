@@ -6,7 +6,7 @@ Two projects in one repo, designed to work together:
 
 1. **Local LLM servers** (`lfm_thinking.py` for macOS/MLX, `linux_thinking.py` for Linux/transformers) — dynamically discover any model on disk and serve it as an OpenAI-compatible API.
 2. **Obedient Beast** (`obedient_beast/`) — a small, powerful personal AI agent with CLI, WhatsApp, and HTTP front-ends, tool calling, autonomous task scheduling, persistent memory, a skills registry, and persistent browser control.
-3. **Local FLUX art** (`flux_art.py`, macOS Apple Silicon only) — text-to-image with **FLUX.2-klein** via the **mflux** package and your own downloaded weights; runs on Metal, no image API keys.
+3. **Local FLUX art** — text-to-image with **FLUX.2-klein** via **mflux** and local weights (no image API keys). Use **`flux_art.py`** on **macOS Apple Silicon** (Metal). Use **`flux_art_linux.py`** on **Linux** (MLX with CUDA or CPU). **Obedient Beast does not invoke these on Linux/Unix yet**; only the macOS script is wired for agent use today—adding Unix agent integration would be a separate change.
 
 The LLM servers are optional — Beast also talks to Claude and OpenAI out of the box. But running both together gives you a fully local, self-hosted assistant.
 
@@ -66,7 +66,8 @@ Agents/
 ├── README.md                 ← you are here
 ├── lfm_thinking.py           ← macOS/MLX local LLM server
 ├── linux_thinking.py         ← Linux/transformers local LLM server
-├── flux_art.py               ← local FLUX.2-klein text-to-image (macOS / mflux)
+├── flux_art.py               ← local FLUX.2-klein text-to-image (macOS Metal / mflux)
+├── flux_art_linux.py         ← same idea on Linux (MLX CUDA or CPU / mflux); not used by Beast yet
 ├── generated_art/            ← default PNG output (gitignored — not pushed to GitHub)
 ├── scratch/                  ← optional local scripts/experiments (gitignored)
 ├── test_client.py            ← streaming test client for the servers
@@ -121,6 +122,8 @@ Features: dynamic model discovery, automatic text/vision detection, streaming, i
 ---
 
 ## Local FLUX image generation (macOS)
+
+**Platforms:** `flux_art.py` is for **macOS Apple Silicon** (Metal). For **Linux** (NVIDIA or CPU), use **`flux_art_linux.py`** with **`pip install mflux`** and an MLX wheel for your platform (`mlx[cuda12]`, `mlx[cuda13]`, or `mlx[cpu]` — see [MLX installation](https://ml-explore.github.io/mlx/)). The CLI and `FLUX_ART_MODEL` behavior match `flux_art.py`; the Linux script exits with a hint if you run it on macOS (use `flux_art.py` there). **Agent integration:** Beast’s `generate_art` path targets the macOS script only for now; nothing in the agent calls `flux_art_linux.py` yet.
 
 On **Apple Silicon**, you can generate images **entirely on-device** with `flux_art.py`: no Stability/Replicate/OpenAI image API keys. It uses **mflux** + **MLX** and a **local folder of FLUX.2-klein weights** (the pre-quantized mflux 4-bit bundle is the intended format).
 
@@ -295,7 +298,7 @@ The LLM calls `browser_goto(url="https://github.com/notifications")`, then `brow
 | `ALLOWED_NUMBERS` / `ALLOWED_GROUPS` | WhatsApp access control |
 | `NOTIFICATION_CHAT_ID` | WhatsApp target for autonomous task notifications |
 | `HEARTBEAT_INTERVAL_SEC` | seconds between heartbeat cycles |
-| `FLUX_ART_MODEL` | (optional) path to FLUX.2-klein mflux-4bit weights for `flux_art.py` |
+| `FLUX_ART_MODEL` | (optional) path to FLUX.2-klein mflux-4bit weights for `flux_art.py` / `flux_art_linux.py` |
 
 ---
 
@@ -322,6 +325,7 @@ If you are an LLM reading this to understand the codebase, here is the minimal m
 - **Local LLM timing out** → make sure `lfm_thinking.py --server` is running and `LFM_URL` in `.env` points to the right port.
 - **`flux_art.py` / `import mlx` fails with `libmlx.dylib` missing** → the Metal wheel did not unpack fully; run `pip install --upgrade --force-reinstall mlx mlx-metal` in the same venv.
 - **`flux_art.py` says model folder not found** → download the mflux 4-bit bundle and point `--model` or `FLUX_ART_MODEL` at that directory (default: `~/FLUX.2-klein-4B-mflux-4bit`).
+- **`flux_art_linux.py` on Linux** → install `mflux` and the correct **MLX** wheel for your GPU (`mlx[cuda12]` / `mlx[cuda13]`) or `mlx[cpu]`; follow MLX docs if `import mlx.core` fails.
 - **MCP server won't load** → run with `MCP_ENABLED=true` and check logs; Beast keeps running on MCP failures, so missing MCP tools just reduce capability, they don't crash the agent.
 
 ---
