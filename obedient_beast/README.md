@@ -259,6 +259,28 @@ MCP servers are external tool providers that give Beast additional capabilities.
 
 Beast can self-upgrade: the `install_mcp_server` tool lets it add new MCP servers at runtime.
 
+## WhatsApp @beast Access — Dynamic Group Control
+
+By default, only OWNER (your own WhatsApp account) can talk to Beast. You can dynamically open groups so that **anyone** in the group can trigger Beast by mentioning `@beast`.
+
+**Commands (OWNER only — others cannot use these):**
+
+| Command | Where to send | What it does |
+|---------|---------------|--------------|
+| `!openbeast` | In a group chat | Opens that group — anyone can now `@beast` |
+| `!closebeast` | In a group chat | Closes that group — revokes @beast access |
+| `!listbeast` | Anywhere | Lists all currently open groups |
+
+**How others use it:**
+- Someone in an opened group types: `@beast what's the capital of France?`
+- Beast responds in the group chat
+- The `@beast` prefix is stripped before processing
+
+**Details:**
+- Open groups persist across restarts (saved to `workspace/open_chats.json`)
+- Only OWNER can open/close groups — the commands are ignored for everyone else
+- Existing `ALLOWED_NUMBERS` / `ALLOWED_GROUPS` rules still apply independently
+
 ## Configuration
 
 Copy `.env.example` to `.env` in the `obedient_beast/` directory. Key settings:

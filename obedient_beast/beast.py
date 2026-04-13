@@ -1620,6 +1620,11 @@ Currently: **{TIER_LABEL}** — depth {DEPTH} (chains up to {DEPTH} steps per re
 `/new` — start fresh conversation (CLI only)
 `/quit` — exit (CLI only)
 
+**WhatsApp group access (OWNER only):**
+`!openbeast` — send in a group to let anyone @beast there
+`!closebeast` — revoke @beast access in that group
+`!listbeast` — show which groups are currently open
+
 **✨ New powers:**
 • **Loop detection** — I bail automatically if I get stuck repeating a tool
 • **BOOT.md** — drop `workspace/BOOT.md` and I run it once a day on launch (`/boot install` to start from the example, `/boot` to rerun now)

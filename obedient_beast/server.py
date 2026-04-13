@@ -34,6 +34,7 @@ Usage:
 """
 
 import os
+import json
 from flask import Flask, request, jsonify
 from dotenv import load_dotenv
 
@@ -58,6 +59,35 @@ RESPOND_TO_OTHERS = os.getenv("RESPOND_TO_OTHERS", "false").lower() == "true"
 
 # Single LLM instance shared across all requests
 llm = get_llm()
+
+# ---------------------------------------------------------------------------
+# Dynamic @beast access: OWNER can open/close groups at runtime
+# ---------------------------------------------------------------------------
+# OWNER sends "!openbeast" in a group → anyone in that group can @beast
+# OWNER sends "!closebeast" in a group → revoke access
+# OWNER sends "!listbeast" anywhere → list open groups
+# Persisted to workspace/open_chats.json so it survives restarts.
+# ---------------------------------------------------------------------------
+OPEN_CHATS_FILE = os.path.join(os.path.dirname(__file__), "workspace", "open_chats.json")
+
+
+def load_open_chats() -> set:
+    """Load the set of dynamically opened group chat IDs from disk."""
+    try:
+        with open(OPEN_CHATS_FILE, "r") as f:
+            return set(json.load(f))
+    except (FileNotFoundError, json.JSONDecodeError):
+        return set()
+
+
+def save_open_chats(chats: set):
+    """Persist the set of opened group chat IDs to disk."""
+    os.makedirs(os.path.dirname(OPEN_CHATS_FILE), exist_ok=True)
+    with open(OPEN_CHATS_FILE, "w") as f:
+        json.dump(sorted(chats), f, indent=2)
+
+
+OPEN_CHATS = load_open_chats()
 
 
 def is_allowed(sender: str, chat_id: str = None) -> bool:
@@ -135,21 +165,47 @@ def message():
     if not text:
         return jsonify({"error": "No text provided"}), 400
 
-    # --- @beast mention: lets OWNER summon Beast in ANY group chat ---
-    # In shared groups (not in ALLOWED_GROUPS), Beast normally ignores messages.
-    # Starting a message with "@beast" bypasses group restrictions for OWNER only.
-    # The "@beast" prefix is stripped before passing to Beast.
-    # Example: "@beast check disk space" → Beast processes "check disk space"
+    # --- Magic commands: OWNER can open/close groups for @beast access ---
+    text_lower = text.lower().strip()
+    if sender == "OWNER":
+        global OPEN_CHATS
+        if text_lower == "!openbeast":
+            if not chat_id or not chat_id.endswith("@g.us"):
+                return jsonify({"response": "Send !openbeast from inside a group chat."}), 200
+            OPEN_CHATS.add(chat_id)
+            save_open_chats(OPEN_CHATS)
+            print(f"[!openbeast] Opened group {chat_id}")
+            return jsonify({"response": f"Beast is now listening for @beast in this group."}), 200
+        elif text_lower == "!closebeast":
+            if not chat_id or not chat_id.endswith("@g.us"):
+                return jsonify({"response": "Send !closebeast from inside a group chat."}), 200
+            OPEN_CHATS.discard(chat_id)
+            save_open_chats(OPEN_CHATS)
+            print(f"[!closebeast] Closed group {chat_id}")
+            return jsonify({"response": f"Beast no longer listening in this group."}), 200
+        elif text_lower == "!listbeast":
+            if OPEN_CHATS:
+                listing = "\n".join(f"  • {c}" for c in sorted(OPEN_CHATS))
+                return jsonify({"response": f"Open groups:\n{listing}"}), 200
+            else:
+                return jsonify({"response": "No groups currently open."}), 200
+
+    # --- @beast mention handling ---
+    # 1. OWNER @beast → always works (bypasses group restrictions)
+    # 2. Anyone @beast in an OPEN_CHATS group → allowed
+    # 3. Normal allowlist rules apply otherwise
     beast_mention = False
-    if text.lower().startswith("@beast"):
+    if text_lower.startswith("@beast"):
         beast_mention = True
         text = text[6:].strip()  # Strip "@beast" prefix
         if not text:
             return jsonify({"response": "Usage: @beast <your message>"}), 200
 
-    # Check allowlist — @beast from OWNER bypasses group restrictions
+    # Check authorization
     if beast_mention and sender == "OWNER":
         print(f"[@beast] OWNER mention in {chat_id}")
+    elif beast_mention and chat_id in OPEN_CHATS:
+        print(f"[@beast] Open-group mention by {sender} in {chat_id}")
     elif not is_allowed(sender, chat_id):
         return jsonify({"error": "Not authorized"}), 403
 
@@ -189,5 +245,7 @@ if __name__ == "__main__":
     print(f"   Port: {PORT}")
     print(f"   Backend: {BACKEND}")
     print(f"   Allowlist: {ALLOWED_NUMBERS if ALLOWED_NUMBERS else '(OWNER only — set ALLOWED_NUMBERS to add others)'}")
+    if OPEN_CHATS:
+        print(f"   Open groups (@beast): {len(OPEN_CHATS)} group(s)")
     print("=" * 60)
     app.run(host="0.0.0.0", port=PORT, debug=False)
