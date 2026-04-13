@@ -27,7 +27,13 @@ from datetime import datetime
 # Configuration
 # ---------------------------------------------------------------------------
 OUTPUT_DIR = Path(__file__).parent / "generated_art"
-MODEL_HF = "RunPod/FLUX.2-klein-4B-mflux-4bit"  # auto-downloaded on first use
+# Auto-detect: check common local paths first, fall back to HuggingFace download
+MODEL_LOCAL_PATHS = [
+    Path.home() / "FLUX.2-klein-4B-mflux-4bit",
+    Path.home() / "MLX_Models" / "FLUX.2-klein-4B-mflux-4bit",
+    Path(__file__).parent / "FLUX.2-klein-4B-mflux-4bit",
+]
+MODEL_HF = "RunPod/FLUX.2-klein-4B-mflux-4bit"  # auto-download fallback
 DEFAULT_WIDTH = 1024
 DEFAULT_HEIGHT = 1024
 DEFAULT_STEPS = 4
@@ -46,7 +52,16 @@ def load_model():
     if _flux is not None:
         return _flux
 
-    print("Loading FLUX.2-klein-4B model...")
+    # Find model: local path first, then HuggingFace
+    model_path = None
+    for p in MODEL_LOCAL_PATHS:
+        if p.exists() and any(p.rglob("*.safetensors")):
+            model_path = str(p)
+            break
+    if model_path is None:
+        model_path = MODEL_HF  # mflux auto-downloads from HuggingFace
+
+    print(f"Loading FLUX.2-klein-4B from {model_path}...")
     start = time.time()
 
     from mflux.models.flux2.variants.txt2img.flux2_klein import Flux2Klein
@@ -54,7 +69,7 @@ def load_model():
 
     _flux = Flux2Klein(
         quantize=4,
-        model_path=MODEL_HF,
+        model_path=model_path,
         model_config=ModelConfig.flux2_klein_4b(),
     )
 
