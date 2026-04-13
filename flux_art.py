@@ -43,10 +43,9 @@ def load_model():
     print("Loading FLUX.2-klein-4B...")
     start = time.time()
 
-    from mflux import Flux2
-    _flux = Flux2(
-        model="RunPod/FLUX.2-klein-4B-mflux-4bit",
-        base_model="flux2-klein-4b",
+    from mflux.models.flux2.variants.txt2img.flux2_klein import Flux2Klein
+    _flux = Flux2Klein(
+        model_path="/Users/jonathanrothberg/FLUX.2-klein-4B-mflux-4bit",
     )
 
     print(f"  Loaded in {time.time() - start:.1f}s")
