@@ -37,3 +37,9 @@ obedient_beast/workspace/media/
 # Python bytecode
 __pycache__/
 *.pyc
+
+# Local-only: generated images, caches, and workspace output (never commit or push)
+generated_art/
+.claude/
+obedient_beast/workspace/Generated Code/
+scratch/

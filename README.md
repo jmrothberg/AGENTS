@@ -67,7 +67,8 @@ Agents/
 ├── lfm_thinking.py           ← macOS/MLX local LLM server
 ├── linux_thinking.py         ← Linux/transformers local LLM server
 ├── flux_art.py               ← local FLUX.2-klein text-to-image (macOS / mflux)
-├── generated_art/            ← default output folder for flux_art.py PNGs (created on use)
+├── generated_art/            ← default PNG output (gitignored — not pushed to GitHub)
+├── scratch/                  ← optional local scripts/experiments (gitignored)
 ├── test_client.py            ← streaming test client for the servers
 ├── requirements.txt          ← top-level (server) Python deps
 └── obedient_beast/           ← the agent
@@ -90,6 +91,8 @@ Agents/
     │   └── memory.json       ← persistent local facts (capped at 200)
     └── whatsapp/bridge.js    ← WhatsApp connector (Baileys)
 ```
+
+**Repository hygiene:** Generated images (for example `generated_art/`), Cursor/Claude local state (`.claude/`), Beast `workspace/Generated Code/`, and anything you put in `scratch/` are **gitignored** and must not be pushed to GitHub. Keep local one-off scripts and experiments under `scratch/` or outside the repo.
 
 ---
 
