@@ -2,8 +2,8 @@
 """
 FLUX Art Generator — Standalone text-to-image on Apple Silicon
 ==============================================================
-Uses mflux with FLUX.2-klein-4B (4-bit quantized, 4B params) to generate
-images from text prompts. Runs entirely on Apple Silicon Metal GPU.
+Uses mflux with FLUX.2-klein-4B (pre-quantized 4-bit) to generate
+images from text prompts. Runs on Apple Silicon Metal GPU.
 
 Usage:
     python flux_art.py "a cat astronaut floating in space"
@@ -13,8 +13,6 @@ Usage:
     # As a library (for Beast integration)
     from flux_art import generate_image
     path = generate_image("a fox in a forest")
-
-Output: Images saved to ./generated_art/<timestamp>_<prompt_slug>.png
 """
 
 import sys
@@ -23,17 +21,7 @@ import argparse
 from pathlib import Path
 from datetime import datetime
 
-# ---------------------------------------------------------------------------
-# Configuration
-# ---------------------------------------------------------------------------
 OUTPUT_DIR = Path(__file__).parent / "generated_art"
-# Auto-detect: check common local paths first, fall back to HuggingFace download
-MODEL_LOCAL_PATHS = [
-    Path.home() / "FLUX.2-klein-4B-mflux-4bit",
-    Path.home() / "MLX_Models" / "FLUX.2-klein-4B-mflux-4bit",
-    Path(__file__).parent / "FLUX.2-klein-4B-mflux-4bit",
-]
-MODEL_HF = "RunPod/FLUX.2-klein-4B-mflux-4bit"  # auto-download fallback
 DEFAULT_WIDTH = 1024
 DEFAULT_HEIGHT = 1024
 DEFAULT_STEPS = 4
@@ -52,25 +40,13 @@ def load_model():
     if _flux is not None:
         return _flux
 
-    # Find model: local path first, then HuggingFace
-    model_path = None
-    for p in MODEL_LOCAL_PATHS:
-        if p.exists() and any(p.rglob("*.safetensors")):
-            model_path = str(p)
-            break
-    if model_path is None:
-        model_path = MODEL_HF  # mflux auto-downloads from HuggingFace
-
-    print(f"Loading FLUX.2-klein-4B from {model_path}...")
+    print("Loading FLUX.2-klein-4B...")
     start = time.time()
 
-    from mflux.models.flux2.variants.txt2img.flux2_klein import Flux2Klein
-    from mflux.models.common.config.model_config import ModelConfig
-
-    _flux = Flux2Klein(
-        quantize=4,
-        model_path=model_path,
-        model_config=ModelConfig.flux2_klein_4b(),
+    from mflux import Flux2
+    _flux = Flux2(
+        model="RunPod/FLUX.2-klein-4B-mflux-4bit",
+        base_model="flux2-klein-4b",
     )
 
     print(f"  Loaded in {time.time() - start:.1f}s")
@@ -109,11 +85,11 @@ def generate_image(
 
     start = time.time()
     image = flux.generate_image(
-        seed=seed,
         prompt=prompt,
-        num_inference_steps=steps,
         width=width,
         height=height,
+        num_inference_steps=steps,
+        seed=seed,
     )
     elapsed = time.time() - start
 
