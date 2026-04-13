@@ -6,6 +6,7 @@ Two projects in one repo, designed to work together:
 
 1. **Local LLM servers** (`lfm_thinking.py` for macOS/MLX, `linux_thinking.py` for Linux/transformers) — dynamically discover any model on disk and serve it as an OpenAI-compatible API.
 2. **Obedient Beast** (`obedient_beast/`) — a small, powerful personal AI agent with CLI, WhatsApp, and HTTP front-ends, tool calling, autonomous task scheduling, persistent memory, a skills registry, and persistent browser control.
+3. **Local FLUX art** (`flux_art.py`, macOS Apple Silicon only) — text-to-image with **FLUX.2-klein** via the **mflux** package and your own downloaded weights; runs on Metal, no image API keys.
 
 The LLM servers are optional — Beast also talks to Claude and OpenAI out of the box. But running both together gives you a fully local, self-hosted assistant.
 
@@ -16,13 +17,14 @@ The LLM servers are optional — Beast also talks to Claude and OpenAI out of th
 1. [Quick start](#quick-start)
 2. [Repo layout](#repo-layout)
 3. [Local LLM servers](#local-llm-servers)
-4. [Obedient Beast](#obedient-beast)
-5. [Adding a skill](#adding-a-skill)
-6. [Scheduling work with cron](#scheduling-work-with-cron)
-7. [Persistent browser control](#persistent-browser-control)
-8. [Environment variables](#environment-variables)
-9. [For LLMs reading this repo](#for-llms-reading-this-repo)
-10. [Troubleshooting](#troubleshooting)
+4. [Local FLUX image generation (macOS)](#local-flux-image-generation-macos)
+5. [Obedient Beast](#obedient-beast)
+6. [Adding a skill](#adding-a-skill)
+7. [Scheduling work with cron](#scheduling-work-with-cron)
+8. [Persistent browser control](#persistent-browser-control)
+9. [Environment variables](#environment-variables)
+10. [For LLMs reading this repo](#for-llms-reading-this-repo)
+11. [Troubleshooting](#troubleshooting)
 
 ---
 
@@ -38,6 +40,10 @@ pip install -r obedient_beast/requirements.txt
 
 # 2. (Optional) Start a local LLM server — macOS
 python lfm_thinking.py --model latest --server
+
+# 2b. (Optional) Local FLUX text-to-image — macOS Apple Silicon only (see section below)
+# pip install mflux
+# python flux_art.py "a watercolor fox"
 
 # 3. Configure Beast — pick a brain
 cp obedient_beast/.env.example obedient_beast/.env
@@ -60,6 +66,8 @@ Agents/
 ├── README.md                 ← you are here
 ├── lfm_thinking.py           ← macOS/MLX local LLM server
 ├── linux_thinking.py         ← Linux/transformers local LLM server
+├── flux_art.py               ← local FLUX.2-klein text-to-image (macOS / mflux)
+├── generated_art/            ← default output folder for flux_art.py PNGs (created on use)
 ├── test_client.py            ← streaming test client for the servers
 ├── requirements.txt          ← top-level (server) Python deps
 └── obedient_beast/           ← the agent
@@ -106,6 +114,43 @@ python test_client.py                             # quick streaming sanity test
 Features: dynamic model discovery, automatic text/vision detection, streaming, image and video analysis for VL models, optional TTS, OpenAI-compatible `/v1/chat/completions`.
 
 > The `lfm_` and `LFM_URL` naming is a legacy artifact from the project's LiquidAI days. The scripts now work with any compatible model.
+
+---
+
+## Local FLUX image generation (macOS)
+
+On **Apple Silicon**, you can generate images **entirely on-device** with `flux_art.py`: no Stability/Replicate/OpenAI image API keys. It uses **mflux** + **MLX** and a **local folder of FLUX.2-klein weights** (the pre-quantized mflux 4-bit bundle is the intended format).
+
+**1. Install Python deps** (same venv as the rest of the repo is fine):
+
+```bash
+pip install mflux
+```
+
+On macOS, `mlx` / `mlx-metal` supply the Metal backend; if `import mlx.core` fails with `Library not loaded: libmlx.dylib`, reinstall them:
+
+```bash
+pip install --upgrade --force-reinstall mlx mlx-metal
+```
+
+**2. Download weights** into a directory that contains `config.json`, `transformer/`, `vae/`, `text_encoder/`, and `tokenizer/` (for example the Hugging Face **FLUX.2-klein-4B mflux-4bit** artifact). By default the script looks for:
+
+`~/FLUX.2-klein-4B-mflux-4bit`
+
+Override with **`--model /path/to/weights`** or the **`FLUX_ART_MODEL`** environment variable.
+
+**3. Run:**
+
+```bash
+python flux_art.py "a red balloon over a city at dusk"
+python flux_art.py --width 1024 --height 768 --seed 42 "sunset"
+python flux_art.py --model ~/my-models/FLUX.2-klein-4B-mflux-4bit "a sketch of a bridge"
+python flux_art.py   # interactive prompts; type quit to exit
+```
+
+Images are written under **`generated_art/`** in the repo root (or use `--output` for a filename). Use **`python flux_art.py --help`** for all flags.
+
+**Note:** Use at least **2 inference steps** (the default is 4). Single-step runs can error inside the scheduler.
 
 ---
 
@@ -247,6 +292,7 @@ The LLM calls `browser_goto(url="https://github.com/notifications")`, then `brow
 | `ALLOWED_NUMBERS` / `ALLOWED_GROUPS` | WhatsApp access control |
 | `NOTIFICATION_CHAT_ID` | WhatsApp target for autonomous task notifications |
 | `HEARTBEAT_INTERVAL_SEC` | seconds between heartbeat cycles |
+| `FLUX_ART_MODEL` | (optional) path to FLUX.2-klein mflux-4bit weights for `flux_art.py` |
 
 ---
 
@@ -271,6 +317,8 @@ If you are an LLM reading this to understand the codebase, here is the minimal m
 - **Cron task never fires** → check `heartbeat.py --status` to confirm the task has a `next_run_at` in the future, and make sure the heartbeat is actually running (`/heartbeat` from the CLI).
 - **`browser_goto` returns "Playwright is not installed"** → `pip install playwright && python -m playwright install chromium`.
 - **Local LLM timing out** → make sure `lfm_thinking.py --server` is running and `LFM_URL` in `.env` points to the right port.
+- **`flux_art.py` / `import mlx` fails with `libmlx.dylib` missing** → the Metal wheel did not unpack fully; run `pip install --upgrade --force-reinstall mlx mlx-metal` in the same venv.
+- **`flux_art.py` says model folder not found** → download the mflux 4-bit bundle and point `--model` or `FLUX_ART_MODEL` at that directory (default: `~/FLUX.2-klein-4B-mflux-4bit`).
 - **MCP server won't load** → run with `MCP_ENABLED=true` and check logs; Beast keeps running on MCP failures, so missing MCP tools just reduce capability, they don't crash the agent.
 
 ---

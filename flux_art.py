@@ -8,26 +8,31 @@ images from text prompts. Runs on Apple Silicon Metal GPU.
 Usage:
     python flux_art.py "a cat astronaut floating in space"
     python flux_art.py "sunset" --width 1024 --height 768 --seed 42
+    python flux_art.py --model ~/FLUX.2-klein-4B-mflux-4bit "a dog"
+    export FLUX_ART_MODEL=~/path/to/FLUX.2-klein-4B-mflux-4bit
     python flux_art.py   # interactive mode
 
     # As a library (for Beast integration)
     from flux_art import generate_image
-    path = generate_image("a fox in a forest")
+    path = generate_image("a fox in a forest", model_path="~/FLUX.2-klein-4B-mflux-4bit")
 """
 
-import sys
+import os
 import time
 import argparse
 from pathlib import Path
 from datetime import datetime
 
 OUTPUT_DIR = Path(__file__).parent / "generated_art"
+# Local mflux 4-bit weights (same layout as Hugging Face "mflux-4bit" bundle).
+DEFAULT_MODEL_PATH = Path.home() / "FLUX.2-klein-4B-mflux-4bit"
 DEFAULT_WIDTH = 1024
 DEFAULT_HEIGHT = 1024
 DEFAULT_STEPS = 4
 DEFAULT_SEED = None
 
 _flux = None
+_loaded_model_path: Path | None = None
 
 
 def _slugify(text: str, max_len: int = 40) -> str:
@@ -35,18 +40,36 @@ def _slugify(text: str, max_len: int = 40) -> str:
     return re.sub(r'[^a-z0-9]+', '_', text.lower()).strip('_')[:max_len]
 
 
-def load_model():
-    global _flux
-    if _flux is not None:
+def resolve_model_path(explicit: str | Path | None = None) -> Path:
+    """CLI --model > env FLUX_ART_MODEL > default under home."""
+    if explicit is not None:
+        return Path(explicit).expanduser().resolve()
+    env = os.environ.get("FLUX_ART_MODEL")
+    if env:
+        return Path(env).expanduser().resolve()
+    return DEFAULT_MODEL_PATH.resolve()
+
+
+def load_model(model_path: str | Path | None = None) -> object:
+    global _flux, _loaded_model_path
+    path = resolve_model_path(model_path)
+    if _flux is not None and _loaded_model_path == path:
         return _flux
 
-    print("Loading FLUX.2-klein-4B...")
+    if not path.is_dir():
+        raise FileNotFoundError(
+            f"Model folder not found: {path}\n"
+            "  Point --model or FLUX_ART_MODEL at your FLUX.2-klein mflux-4bit directory "
+            f"(default: {DEFAULT_MODEL_PATH})."
+        )
+
+    print(f"Loading FLUX.2-klein from {path} ...")
     start = time.time()
 
     from mflux.models.flux2.variants.txt2img.flux2_klein import Flux2Klein
-    _flux = Flux2Klein(
-        model_path="/Users/jonathanrothberg/FLUX.2-klein-4B-mflux-4bit",
-    )
+
+    _flux = Flux2Klein(model_path=str(path))
+    _loaded_model_path = path
 
     print(f"  Loaded in {time.time() - start:.1f}s")
     return _flux
@@ -60,6 +83,7 @@ def generate_image(
     seed: int | None = DEFAULT_SEED,
     output_dir: str | Path | None = None,
     output_filename: str | None = None,
+    model_path: str | Path | None = None,
 ) -> str:
     out = Path(output_dir) if output_dir else OUTPUT_DIR
     out.mkdir(parents=True, exist_ok=True)
@@ -80,7 +104,7 @@ def generate_image(
     print(f"  Steps:  {steps}")
     print(f"  Seed:   {seed}")
 
-    flux = load_model()
+    flux = load_model(model_path)
 
     start = time.time()
     image = flux.generate_image(
@@ -99,13 +123,34 @@ def generate_image(
 
 
 def main():
-    parser = argparse.ArgumentParser(description="FLUX Art Generator — Apple Silicon")
-    parser.add_argument("prompt", nargs="?", help="Text prompt (omit for interactive)")
-    parser.add_argument("--width", type=int, default=DEFAULT_WIDTH)
-    parser.add_argument("--height", type=int, default=DEFAULT_HEIGHT)
-    parser.add_argument("--steps", type=int, default=DEFAULT_STEPS)
-    parser.add_argument("--seed", type=int, default=None)
-    parser.add_argument("--output", type=str, default=None)
+    _epilog = f"""\
+Local text-to-image on Apple Silicon (Metal): load FLUX.2-klein mflux-4bit weights from disk — no cloud image API.
+
+  Default weights folder: {DEFAULT_MODEL_PATH}
+  Override: --model PATH  or  export FLUX_ART_MODEL=PATH
+
+  Output: {OUTPUT_DIR}/  (use --output for a fixed filename)
+  Needs: pip install mflux   (and working mlx / mlx-metal on macOS)
+
+  Use at least 2 --steps (default {DEFAULT_STEPS}); step count 1 can fail in the scheduler.
+"""
+    parser = argparse.ArgumentParser(
+        description="Draw images with local FLUX.2-klein (mflux + MLX, Apple Silicon).",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=_epilog,
+    )
+    parser.add_argument("prompt", nargs="?", help="Text prompt (omit for interactive mode)")
+    parser.add_argument("--width", type=int, default=DEFAULT_WIDTH, help="Image width in pixels")
+    parser.add_argument("--height", type=int, default=DEFAULT_HEIGHT, help="Image height in pixels")
+    parser.add_argument("--steps", type=int, default=DEFAULT_STEPS, help="Inference steps (>=2 recommended)")
+    parser.add_argument("--seed", type=int, default=None, help="RNG seed (default: random)")
+    parser.add_argument("--output", type=str, default=None, help="Output filename inside generated_art/")
+    parser.add_argument(
+        "--model",
+        type=str,
+        default=None,
+        help=f"Path to FLUX.2-klein mflux-4bit folder (default: {DEFAULT_MODEL_PATH}, or env FLUX_ART_MODEL)",
+    )
     args = parser.parse_args()
 
     print("=" * 60)
@@ -113,7 +158,15 @@ def main():
     print("=" * 60)
 
     if args.prompt:
-        path = generate_image(args.prompt, args.width, args.height, args.steps, args.seed, output_filename=args.output)
+        path = generate_image(
+            args.prompt,
+            args.width,
+            args.height,
+            args.steps,
+            args.seed,
+            output_filename=args.output,
+            model_path=args.model,
+        )
         print(f"\nImage: {path}")
     else:
         print("\nInteractive mode. Type 'quit' to exit.\n")
@@ -124,7 +177,7 @@ def main():
                     continue
                 if prompt.lower() in ("quit", "exit", "q"):
                     break
-                generate_image(prompt, args.width, args.height, args.steps, args.seed)
+                generate_image(prompt, args.width, args.height, args.steps, args.seed, model_path=args.model)
                 print()
             except KeyboardInterrupt:
                 break
