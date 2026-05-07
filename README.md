@@ -6,7 +6,7 @@ Two projects in one repo, designed to work together:
 
 1. **Local LLM servers** (`lfm_thinking.py` for macOS/MLX, `linux_thinking.py` for Linux/transformers) — dynamically discover any model on disk and serve it as an OpenAI-compatible API.
 2. **Obedient Beast** (`obedient_beast/`) — a small, powerful personal AI agent with CLI, WhatsApp, and HTTP front-ends, tool calling, autonomous task scheduling, persistent memory, a skills registry, and persistent browser control.
-3. **Local FLUX art** — text-to-image with **FLUX.2-klein** via **mflux** and local weights (no image API keys). Use **`flux_art.py`** on **macOS Apple Silicon** (Metal). Use **`flux_art_linux.py`** on **Linux** (MLX with CUDA or CPU). **Obedient Beast does not invoke these on Linux/Unix yet**; only the macOS script is wired for agent use today—adding Unix agent integration would be a separate change.
+3. **Local image generation** — **Obedient Beast** `generate_art` uses **`flux_art.py`** (FLUX.2-klein, **mflux + MLX**) on **macOS Apple Silicon**, and **`zimage_art_linux.py`** (**Z-Image-Turbo**, **PyTorch + diffusers**) on **Linux** with CUDA (or MPS if available). Standalone **`flux_art_linux.py`** remains available for MLX-on-Linux experiments but is not the Beast tool path.
 
 The LLM servers are optional — Beast also talks to Claude and OpenAI out of the box. But running both together gives you a fully local, self-hosted assistant.
 
@@ -38,12 +38,14 @@ python3 -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
 pip install -r obedient_beast/requirements.txt
 
-# 2. (Optional) Start a local LLM server — macOS
-python lfm_thinking.py --model latest --server
+# 2. (Optional) Start a local LLM server
+#    macOS:  python lfm_thinking.py --model latest --server
+#    Linux:  python linux_thinking.py --model latest --server
+#    (Edit MODEL_SEARCH_PATHS at the top of linux_thinking.py for your model folders.)
 
-# 2b. (Optional) Local FLUX text-to-image — macOS Apple Silicon only (see section below)
-# pip install mflux
-# python flux_art.py "a watercolor fox"
+# 2b. (Optional) Local image generation
+#    macOS: pip install mflux && python flux_art.py "a watercolor fox"
+#    Linux (Beast generate_art): install Z-Image stack — see "Z-Image for Beast on Linux" below
 
 # 3. Configure Beast — pick a brain
 cp obedient_beast/.env.example obedient_beast/.env
@@ -66,8 +68,10 @@ Agents/
 ├── README.md                 ← you are here
 ├── lfm_thinking.py           ← macOS/MLX local LLM server
 ├── linux_thinking.py         ← Linux/transformers local LLM server
-├── flux_art.py               ← local FLUX.2-klein text-to-image (macOS Metal / mflux)
-├── flux_art_linux.py         ← same idea on Linux (MLX CUDA or CPU / mflux); not used by Beast yet
+├── flux_art.py               ← local FLUX.2-klein text-to-image (macOS Metal / mflux); Beast on darwin
+├── zimage_art_linux.py       ← Z-Image-Turbo (diffusers); Beast generate_art on Linux
+├── requirements-zimage-linux.txt  ← optional pip companions after torch/diffusers install
+├── flux_art_linux.py         ← FLUX on Linux via MLX (CLI only; not Beast’s generate_art)
 ├── generated_art/            ← default PNG output (gitignored — not pushed to GitHub)
 ├── scratch/                  ← optional local scripts/experiments (gitignored)
 ├── test_client.py            ← streaming test client for the servers
@@ -109,13 +113,16 @@ Both scripts scan your model directories at startup — any folder with a `confi
 Common commands:
 
 ```bash
-python lfm_thinking.py                            # interactive model picker + chat
-python lfm_thinking.py --model latest             # interactive with most recent model
-python lfm_thinking.py --model latest --server    # headless OpenAI-compatible API on :8000
+python lfm_thinking.py                            # macOS: interactive model picker + chat
+python lfm_thinking.py --model latest --server    # macOS: OpenAI-compatible API on :8000
+python linux_thinking.py --model latest --server   # Linux: same API contract on :8000 (see MODEL_SEARCH_PATHS)
+python linux_thinking.py --list                    # Linux: list discovered models and exit
 python test_client.py                             # quick streaming sanity test
 ```
 
 Features: dynamic model discovery, automatic text/vision detection, streaming, image and video analysis for VL models, optional TTS, OpenAI-compatible `/v1/chat/completions`.
+
+**`linux_thinking.py` vs `lfm_thinking.py`:** On Linux, `linux_thinking.py` mirrors the same API routes and core behaviors as `lfm_thinking.py` for transformers-backed use: hot-swap **`POST /v1/models/switch`**, **`/v1/chat/completions`** with tools, **vision inputs** (image attachments for VLM models), **SSE token streaming** for text models, richer **tool-call parsing** (JSON repair), **interactive VL** (image / video / text-only menu with tkinter + OpenCV where available), **`speak_sync`**, and **Gemma-friendly** sampling defaults.
 
 > The `lfm_` and `LFM_URL` naming is a legacy artifact from the project's LiquidAI days. The scripts now work with any compatible model.
 
@@ -123,7 +130,7 @@ Features: dynamic model discovery, automatic text/vision detection, streaming, i
 
 ## Local FLUX image generation (macOS)
 
-**Platforms:** `flux_art.py` is for **macOS Apple Silicon** (Metal). For **Linux** (NVIDIA or CPU), use **`flux_art_linux.py`** with **`pip install mflux`** and an MLX wheel for your platform (`mlx[cuda12]`, `mlx[cuda13]`, or `mlx[cpu]` — see [MLX installation](https://ml-explore.github.io/mlx/)). The CLI and `FLUX_ART_MODEL` behavior match `flux_art.py`; the Linux script exits with a hint if you run it on macOS (use `flux_art.py` there). **Agent integration:** Beast’s `generate_art` path targets the macOS script only for now; nothing in the agent calls `flux_art_linux.py` yet.
+**Platforms:** `flux_art.py` is for **macOS Apple Silicon** (Metal). For **Linux** (NVIDIA or CPU), you can use **`flux_art_linux.py`** with **`pip install mflux`** and an MLX wheel (`mlx[cuda12]`, `mlx[cuda13]`, or `mlx[cpu]` — see [MLX installation](https://ml-explore.github.io/mlx/)); that script exits on macOS (use `flux_art.py` there). **Beast `generate_art` on Linux** uses **`zimage_art_linux.py`** (Z-Image-Turbo + **diffusers**, not MLX FLUX) — see [Z-Image for Beast on Linux](#z-image-for-beast-generate_art-on-linux) below.
 
 On **Apple Silicon**, you can generate images **entirely on-device** with `flux_art.py`: no Stability/Replicate/OpenAI image API keys. It uses **mflux** + **MLX** and a **local folder of FLUX.2-klein weights** (the pre-quantized mflux 4-bit bundle is the intended format).
 
@@ -157,6 +164,16 @@ python flux_art.py   # interactive prompts; type quit to exit
 Images are written under **`generated_art/`** in the repo root (or use `--output` for a filename). Use **`python flux_art.py --help`** for all flags.
 
 **Note:** Use at least **2 inference steps** (the default is 4). Single-step runs can error inside the scheduler.
+
+### Z-Image for Beast `generate_art` on Linux
+
+Beast calls **`zimage_art_linux.generate_image`** on non-darwin. You need **PyTorch** (CUDA nightly matching your driver, e.g. cu130) and **diffusers from git** until `ZImagePipeline` is in a PyPI release you trust. A proven install sequence is the script in **Agent_learning**: `scripts/install_diffuser.sh` (set `TORCH_CUDA` if needed), then in the same venv:
+
+```bash
+pip install -r requirements-zimage-linux.txt
+```
+
+Weights: set **`DIFFUSION_MODELS_DIR`** to a parent folder containing **`Z-Image-Turbo/`**, or put weights under **`~/Models_Diffusers/Z-Image-Turbo/`**, or set **`ZIMAGE_ART_MODEL`** to a local directory or Hugging Face id (default hub id: `Tongyi-MAI/Z-Image-Turbo`). PNGs go to **`generated_art/`** like `flux_art.py`.
 
 ---
 
@@ -298,7 +315,9 @@ The LLM calls `browser_goto(url="https://github.com/notifications")`, then `brow
 | `ALLOWED_NUMBERS` / `ALLOWED_GROUPS` | WhatsApp access control |
 | `NOTIFICATION_CHAT_ID` | WhatsApp target for autonomous task notifications |
 | `HEARTBEAT_INTERVAL_SEC` | seconds between heartbeat cycles |
-| `FLUX_ART_MODEL` | (optional) path to FLUX.2-klein mflux-4bit weights for `flux_art.py` / `flux_art_linux.py` |
+| `FLUX_ART_MODEL` | (optional) path to FLUX.2-klein mflux-4bit weights for `flux_art.py` (Beast on macOS) / `flux_art_linux.py` (CLI) |
+| `ZIMAGE_ART_MODEL` | (optional) local directory or Hugging Face id for Beast `generate_art` on Linux (`zimage_art_linux.py`) |
+| `DIFFUSION_MODELS_DIR` | (optional) parent directory containing `Z-Image-Turbo/` for Z-Image weights |
 
 ---
 
@@ -326,6 +345,7 @@ If you are an LLM reading this to understand the codebase, here is the minimal m
 - **`flux_art.py` / `import mlx` fails with `libmlx.dylib` missing** → the Metal wheel did not unpack fully; run `pip install --upgrade --force-reinstall mlx mlx-metal` in the same venv.
 - **`flux_art.py` says model folder not found** → download the mflux 4-bit bundle and point `--model` or `FLUX_ART_MODEL` at that directory (default: `~/FLUX.2-klein-4B-mflux-4bit`).
 - **`flux_art_linux.py` on Linux** → install `mflux` and the correct **MLX** wheel for your GPU (`mlx[cuda12]` / `mlx[cuda13]`) or `mlx[cpu]`; follow MLX docs if `import mlx.core` fails.
+- **Beast `generate_art` on Linux (`ZImagePipeline`)** → install torch (CUDA nightly for your GPU) and `pip install git+https://github.com/huggingface/diffusers`, then `pip install -r requirements-zimage-linux.txt`; see [Z-Image for Beast on Linux](#z-image-for-beast-generate_art-on-linux).
 - **MCP server won't load** → run with `MCP_ENABLED=true` and check logs; Beast keeps running on MCP failures, so missing MCP tools just reduce capability, they don't crash the agent.
 
 ---

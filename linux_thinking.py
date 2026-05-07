@@ -47,6 +47,15 @@ import re
 import argparse
 import threading
 import queue
+import tkinter as tk
+from tkinter import filedialog
+from datetime import datetime
+
+import cv2
+from PIL import Image
+
+# Hide tkinter root for file dialogs (interactive VL mode).
+tk.Tk().withdraw()
 
 # ============================================================================
 # CONFIGURABLE PATHS - Adjust these for your machine
@@ -116,6 +125,16 @@ def speak(text):
     """Queue text to be spoken (non-blocking)."""
     if TTS_ENABLED and tts_queue and text.strip():
         tts_queue.put(text)
+
+
+def speak_sync(text):
+    """Speak text and wait for completion (parity with lfm_thinking.py)."""
+    if TTS_ENABLED and tts_engine and text.strip():
+        try:
+            tts_engine.say(text)
+            tts_engine.runAndWait()
+        except Exception:
+            pass
 
 
 # ============================================================================
@@ -362,102 +381,192 @@ def clear_model_memory():
 
 def format_tools_for_prompt(tools):
     """
-    Format tools into a CONCISE prompt section for the model.
-
-    We keep the tool list short to avoid overwhelming the model's context.
-    Priority tools are listed first for better attention.
+    Format tools for local LLMs (aligned with lfm_thinking.py server).
+    Priority tools first; run_python / run_html emphasized.
     """
     if not tools:
         return ""
 
-    # Keep only the most useful tools to avoid overwhelming the model
-    priority_tools = [
-        "screenshot", "shell", "read_file", "write_file", "edit_file", "list_dir",
-        "mouse_click", "keyboard_type", "mcp_brave-search_brave_web_search"
+    priority_names = [
+        "generate_art", "run_python", "run_html",
+        "shell", "read_file", "write_file", "edit_file", "list_dir",
+        "screenshot", "add_task", "recall_memory", "fetch_url",
+        "browser_goto", "browser_read",
+        "spawn_agent", "list_skills", "use_skill",
     ]
 
-    tool_list = []
+    priority_lines = []
+    other_names = []
+    seen = set()
+
+    for pname in priority_names:
+        for tool in tools:
+            func = tool.get("function", tool)
+            name = func.get("name", "unknown")
+            if name == pname and name not in seen:
+                seen.add(name)
+                desc = func.get("description", "")[:80]
+                params = func.get("parameters", {}).get("properties", {})
+                param_names = ", ".join(params.keys())
+                priority_lines.append(f"- {name}({param_names}): {desc}")
+
     for tool in tools:
         func = tool.get("function", tool)
         name = func.get("name", "unknown")
-        # Include priority tools first, then limit others
-        if name in priority_tools or len(tool_list) < 15:
-            desc = func.get("description", "")[:50]
-            params = func.get("parameters", {}).get("properties", {})
-            param_names = ", ".join(params.keys())
-            tool_list.append(f"- {name}({param_names}): {desc}")
+        if name not in seen:
+            other_names.append(name)
+            seen.add(name)
 
-    tool_text = "TOOLS: " + " | ".join([t.split(":")[0].strip("- ") for t in tool_list[:10]])
-    return tool_text
+    lines = [
+        "## Available Tools",
+        "Call a tool by outputting JSON in this format:",
+        '```tool_call',
+        '{"name": "tool_name", "arguments": {"param": "value"}}',
+        '```',
+        "",
+        "**IMPORTANT: For Python code use run_python. For HTML pages use run_html. Do NOT use shell or write_file for code.**",
+        "",
+        "**Primary tools:**",
+    ]
+    lines.extend(priority_lines)
+    if other_names:
+        lines.append(f"\n**Other tools ({len(other_names)}):** " + ", ".join(other_names[:20]))
+        if len(other_names) > 20:
+            lines.append(f"  ...and {len(other_names) - 20} more")
+    lines.append("\nRULES:")
+    lines.append("- You MUST call a tool when the user asks you to do something. Never just describe what you would do.")
+    lines.append("- For drawing/art/images: ALWAYS use generate_art. Put a detailed description in the 'prompt' argument.")
+    lines.append("- For Python code: ALWAYS use run_python. Put the code in the 'code' argument. NEVER output ```python blocks — the user cannot run those.")
+    lines.append("- For HTML/JS: ALWAYS use run_html. Put the HTML in the 'html' argument. NEVER use write_file.")
+    lines.append("- Output ONLY the ```tool_call block. No explanation before or after.")
+
+    return "\n".join(lines)
 
 
 def parse_tool_calls(text):
-    """Parse tool calls from model output."""
+    """
+    Parse tool calls with JSON repair (aligned with lfm_thinking.py server).
+    """
     tool_calls = []
 
-    # Pattern 1: ```tool_call\n{...}\n``` - use greedy match for nested braces
-    pattern1 = r'```tool_call\s*\n?\s*(\{.*?\})\s*\n?```'
-    matches = re.findall(pattern1, text, re.DOTALL)
+    def _extract_json(s, start=0):
+        idx = s.find('{', start)
+        if idx < 0:
+            return None, -1
+        depth = 0
+        in_str = False
+        escape = False
+        for i in range(idx, len(s)):
+            c = s[i]
+            if escape:
+                escape = False
+                continue
+            if c == '\\':
+                escape = True
+                continue
+            if c == '"' and not escape:
+                in_str = not in_str
+                continue
+            if in_str:
+                continue
+            if c == '{':
+                depth += 1
+            elif c == '}':
+                depth -= 1
+                if depth == 0:
+                    return s[idx:i + 1], i + 1
+        return None, -1
 
-    # Pattern 1b: ```tool\n{...}\n``` - GLM Flash uses this shorter variant
-    pattern1b = r'```tool\s*\n?\s*(\{.*?\})\s*\n?```'
-    matches += re.findall(pattern1b, text, re.DOTALL)
+    def _repair_json(blob):
+        result = []
+        in_str = False
+        escape = False
+        for c in blob:
+            if escape:
+                result.append(c)
+                escape = False
+                continue
+            if c == '\\':
+                result.append(c)
+                escape = True
+                continue
+            if c == '"':
+                in_str = not in_str
+                result.append(c)
+                continue
+            if in_str:
+                if c == '\n':
+                    result.append('\\n')
+                    continue
+                if c == '\r':
+                    result.append('\\r')
+                    continue
+                if c == '\t':
+                    result.append('\\t')
+                    continue
+            result.append(c)
+        return ''.join(result)
 
-    # Pattern 2: <tool_call>{...}</tool_call> (Qwen3 native format)
-    pattern2 = r'<tool_call>\s*(\{.*?\})\s*</tool_call>'
-    matches += re.findall(pattern2, text, re.DOTALL)
-
-    # Pattern 3: Extract JSON between ```tool_call and ``` more robustly
-    pattern3 = r'```tool_call\s*\n([\s\S]*?)\n```'
-    block_matches = re.findall(pattern3, text)
-
-    # Pattern 3b: Also match ```tool variant for GLM Flash
-    pattern3b = r'```tool\s*\n([\s\S]*?)\n```'
-    block_matches += re.findall(pattern3b, text)
-
-    # Try to parse all matches, deduplicate by name+args
-    all_candidates = matches + block_matches
     seen = set()
 
-    def add_tool_call(data):
-        """Add tool call if not duplicate."""
+    def try_add(data):
         name = data.get("name")
-        args = json.dumps(data.get("arguments", data.get("args", {})))
-        key = f"{name}:{args}"
+        if not name:
+            return
+        args = data.get("arguments", data.get("args", {}))
+        if isinstance(args, str):
+            try:
+                args = json.loads(args)
+            except Exception:
+                args = {}
+        args_str = json.dumps(args)
+        key = f"{name}:{args_str}"
         if key not in seen:
             seen.add(key)
             tool_calls.append({
                 "id": f"call_{uuid.uuid4().hex[:8]}",
                 "type": "function",
-                "function": {"name": name, "arguments": args}
+                "function": {"name": name, "arguments": args_str}
             })
 
-    for match in all_candidates:
-        match = match.strip()
+    def _try_parse(blob, label=""):
+        if not blob:
+            return None
         try:
-            data = json.loads(match)
-            if "name" in data:
-                add_tool_call(data)
-        except json.JSONDecodeError:
-            # Try to extract JSON with brace matching
+            return json.loads(blob)
+        except json.JSONDecodeError as e:
+            print(f"[DEBUG] {label} json.loads failed: {e}")
+            repaired = _repair_json(blob)
             try:
-                start = match.find('{')
-                if start >= 0:
-                    depth = 0
-                    for i, c in enumerate(match[start:]):
-                        if c == '{':
-                            depth += 1
-                        elif c == '}':
-                            depth -= 1
-                            if depth == 0:
-                                data = json.loads(match[start:start + i + 1])
-                                if "name" in data:
-                                    add_tool_call(data)
-                                break
-            except:
-                pass
+                data = json.loads(repaired)
+                print(f"[DEBUG] {label} json.loads succeeded after repair")
+                return data
+            except json.JSONDecodeError as e2:
+                print(f"[DEBUG] {label} json.loads STILL failed after repair: {e2}")
+                print(f"[DEBUG] {label} blob[:200] = {blob[:200]}")
+                return None
 
-    # Only return first tool call to prevent loops
+    for m in re.finditer(r'```tool(?:_call)?\s*\n', text):
+        blob, _ = _extract_json(text, m.end())
+        print(f"[DEBUG] Pattern A: fence at {m.start()}, blob={'found '+str(len(blob))+' chars' if blob else 'None'}")
+        data = _try_parse(blob, "Pattern A")
+        if data and "name" in data:
+            try_add(data)
+
+    if not tool_calls:
+        for m in re.finditer(r'<tool_call>\s*', text):
+            blob, _ = _extract_json(text, m.end())
+            data = _try_parse(blob, "Pattern B")
+            if data and "name" in data:
+                try_add(data)
+
+    if not tool_calls:
+        blob, _ = _extract_json(text)
+        if blob and '"name"' in blob:
+            data = _try_parse(blob, "Pattern C")
+            if data and "name" in data:
+                try_add(data)
+
     return tool_calls[:1]
 
 
@@ -483,11 +592,12 @@ def clean_tool_calls_from_text(text):
 #   Then replace the transformers model loading + generate() calls below
 #   with vLLM's AsyncLLMEngine. See commented sections marked "# VLLM:"
 # ============================================================================
-def run_server_mode(model, tokenizer, model_name, model_type,
+def run_server_mode(model, tokenizer, processor, model_name, model_type,
                     host=DEFAULT_HOST, port=DEFAULT_PORT):
     """
     Run the model as an OpenAI-compatible API server using transformers.
     Supports hot-swapping models via POST /v1/models/switch.
+    Vision models use processor + AutoModelForImageTextToText; text uses tokenizer + CausalLM.
 
     Requests are handled sequentially (one generate() at a time).
     For concurrent batching, switch to vLLM when it supports Blackwell/CUDA 13.
@@ -511,6 +621,7 @@ def run_server_mode(model, tokenizer, model_name, model_type,
     state = {
         "model": model,
         "tokenizer": tokenizer,
+        "processor": processor,
         "model_name": model_name,
         "model_type": model_type,
     }
@@ -644,58 +755,128 @@ def run_server_mode(model, tokenizer, model_name, model_type,
         if "[Tool Result]:" in user_message:
             user_message += "\n\nNow summarize this result for the user in a helpful way."
 
-        # Add tool definitions to the prompt if provided
+        # Add tool definitions to the prompt if provided (lfm_thinking-style)
         if tools:
             tools_prompt = format_tools_for_prompt(tools)
             if tools_prompt:
                 tool_instruction = (
                     f"\n\n{tools_prompt}\n"
-                    "To use a tool, respond ONLY with: "
-                    "```tool_call\n{\"name\": \"TOOL_NAME\", \"arguments\": {}}\n```\n"
-                    "Example for web search: "
-                    "```tool_call\n{\"name\": \"mcp_brave-search_brave_web_search\", "
-                    "\"arguments\": {\"query\": \"intel stock price\"}}\n```\n"
+                    "To use a tool, respond ONLY with: ```tool_call\n"
+                    '{"name": "TOOL_NAME", "arguments": {}}\n```\n'
+                    "Example for web search: ```tool_call\n"
+                    '{"name": "mcp_brave-search_brave_web_search", '
+                    '"arguments": {"query": "intel stock price"}}\n```\n'
                     "DO NOT explain. Just output the tool_call block."
                 )
                 user_message = user_message + tool_instruction
 
         return user_message, system_message, image_path
 
-    def generate_response(user_message, system_message, temperature, max_tokens):
-        """
-        Generate a response using transformers model.generate().
-        Runs synchronously on GPU - called via run_in_executor for async.
-        """
+    def _text_generate_kwargs(temperature, max_tokens):
+        """Gemma-friendly sampling (parity with lfm_thinking MLX defaults)."""
+        kwargs = {"do_sample": True, "max_new_tokens": max_tokens}
+        if "gemma" in state["model_name"].lower():
+            kwargs["temperature"] = temperature if temperature is not None else 1.0
+            kwargs["top_p"] = 0.95
+            kwargs["top_k"] = 64
+        else:
+            kwargs["temperature"] = temperature if temperature is not None else 0.7
+        return kwargs
+
+    def generate_text_response(user_message, system_message, temperature, max_tokens):
+        """Causal LM + tokenizer."""
         import torch
-        # Build chat messages for template
+        tok = state["tokenizer"]
+        mdl = state["model"]
         chat_messages = []
         if system_message:
             chat_messages.append({"role": "system", "content": system_message})
         chat_messages.append({"role": "user", "content": user_message})
-
-        inputs = state["tokenizer"].apply_chat_template(
+        inputs = tok.apply_chat_template(
             chat_messages,
             add_generation_prompt=True,
             return_tensors="pt",
             tokenize=True,
         )
-        input_ids = inputs["input_ids"].to(state["model"].device)
-        attention_mask = inputs["attention_mask"].to(state["model"].device)
-
-        output = state["model"].generate(
+        input_ids = inputs["input_ids"].to(mdl.device)
+        attention_mask = inputs["attention_mask"].to(mdl.device)
+        gkw = _text_generate_kwargs(temperature, max_tokens)
+        output = mdl.generate(
             input_ids=input_ids,
             attention_mask=attention_mask,
-            do_sample=True,
-            temperature=temperature,
-            max_new_tokens=max_tokens,
+            **gkw,
         )
-
-        response_text = state["tokenizer"].decode(
+        response_text = tok.decode(
             output[0][input_ids.shape[-1]:], skip_special_tokens=True
         )
-        prompt_tokens = input_ids.shape[-1]
-        completion_tokens = output.shape[-1] - input_ids.shape[-1]
+        prompt_tokens = int(input_ids.shape[-1])
+        completion_tokens = int(output.shape[-1] - input_ids.shape[-1])
         return response_text, prompt_tokens, completion_tokens
+
+    def generate_vision_response(
+        user_message, system_message, image_path, temperature, max_tokens
+    ):
+        """VLM: processor + image file path (optional) + text prompt."""
+        proc = state["processor"]
+        mdl = state["model"]
+        user_content = []
+        if image_path:
+            user_content.append({
+                "type": "image",
+                "image": Image.open(image_path).convert("RGB"),
+            })
+        user_content.append({"type": "text", "text": user_message})
+        msgs = []
+        if system_message:
+            msgs.append({"role": "system", "content": system_message})
+        msgs.append({"role": "user", "content": user_content})
+        inputs = proc.apply_chat_template(
+            msgs,
+            add_generation_prompt=True,
+            return_tensors="pt",
+            return_dict=True,
+            tokenize=True,
+        ).to(mdl.device)
+        if "gemma" in state["model_name"].lower():
+            temp = temperature if temperature is not None else 1.0
+            outputs = mdl.generate(
+                **inputs,
+                do_sample=True,
+                temperature=temp,
+                top_p=0.95,
+                top_k=64,
+                max_new_tokens=max_tokens,
+            )
+        else:
+            outputs = mdl.generate(
+                **inputs,
+                do_sample=True,
+                temperature=temperature if temperature is not None else 0.7,
+                max_new_tokens=max_tokens,
+            )
+        response_text = proc.batch_decode(outputs, skip_special_tokens=True)[0]
+        if "assistant" in response_text.lower():
+            response_text = response_text.split("assistant")[-1].strip()
+        try:
+            prompt_tokens = int(inputs["input_ids"].shape[-1])
+            completion_tokens = int(outputs.shape[-1] - prompt_tokens)
+        except Exception:
+            prompt_tokens = len(user_message.split())
+            completion_tokens = (
+                len(response_text.split()) if response_text else 0
+            )
+        return response_text, prompt_tokens, completion_tokens
+
+    def generate_response(user_message, system_message, temperature, max_tokens, image_path=None):
+        """Dispatch text vs vision (lfm_thinking parity for Beast + local API)."""
+        if state["model_type"] == "vision" and state.get("processor") is not None:
+            return generate_vision_response(
+                user_message, system_message, image_path,
+                temperature, max_tokens,
+            )
+        return generate_text_response(
+            user_message, system_message, temperature, max_tokens,
+        )
 
     # ----------------------------------------------------------------
     # Endpoints
@@ -741,7 +922,12 @@ def run_server_mode(model, tokenizer, model_name, model_type,
         The old model is unloaded and the new one loaded in its place.
         """
         import torch
-        from transformers import AutoModelForCausalLM, AutoTokenizer
+        from transformers import (
+            AutoModelForCausalLM,
+            AutoModelForImageTextToText,
+            AutoProcessor,
+            AutoTokenizer,
+        )
 
         new_key = resolve_model_choice(req.model)
         if new_key is None:
@@ -759,25 +945,45 @@ def run_server_mode(model, tokenizer, model_name, model_type,
 
         # Unload current model
         del state["model"]
-        if state["tokenizer"] is not None:
+        if state.get("tokenizer") is not None:
             del state["tokenizer"]
+            state["tokenizer"] = None
+        if state.get("processor") is not None:
+            del state["processor"]
+            state["processor"] = None
         clear_model_memory()
 
-        # Load new model
+        # Load new model (text vs vision — same split as lfm_thinking transformers path)
         print(f"Loading {new_desc} (transformers)...")
-        new_tokenizer = AutoTokenizer.from_pretrained(
-            new_path, trust_remote_code=True, local_files_only=True
-        )
-        new_model = AutoModelForCausalLM.from_pretrained(
-            new_path,
-            torch_dtype="auto",
-            device_map="auto",
-            trust_remote_code=True,
-            local_files_only=True,
-        )
+        if new_type == "vision":
+            new_processor = AutoProcessor.from_pretrained(
+                new_path, trust_remote_code=True, local_files_only=True
+            )
+            new_model = AutoModelForImageTextToText.from_pretrained(
+                new_path,
+                torch_dtype="auto",
+                device_map="auto",
+                trust_remote_code=True,
+                local_files_only=True,
+            )
+            state["model"] = new_model
+            state["processor"] = new_processor
+            state["tokenizer"] = None
+        else:
+            new_tokenizer = AutoTokenizer.from_pretrained(
+                new_path, trust_remote_code=True, local_files_only=True
+            )
+            new_model = AutoModelForCausalLM.from_pretrained(
+                new_path,
+                torch_dtype="auto",
+                device_map="auto",
+                trust_remote_code=True,
+                local_files_only=True,
+            )
+            state["model"] = new_model
+            state["tokenizer"] = new_tokenizer
+            state["processor"] = None
 
-        state["model"] = new_model
-        state["tokenizer"] = new_tokenizer
         state["model_name"] = new_desc
         state["model_type"] = new_type
 
@@ -802,90 +1008,216 @@ def run_server_mode(model, tokenizer, model_name, model_type,
             if not user_message:
                 raise HTTPException(status_code=400, detail="No user message found")
 
-            # Clean up extracted image (not used by text models, but don't leak tmp files)
-            if image_path:
-                try:
-                    os.unlink(image_path)
-                except OSError:
-                    pass
-
             max_tokens = request.max_tokens or 512
-            temperature = request.temperature or 0.7
+            if request.temperature is not None:
+                temperature = request.temperature
+            elif "gemma" in state["model_name"].lower():
+                temperature = 1.0
+            else:
+                temperature = 0.7
 
             print(f"[DEBUG] Tools received: {len(request.tools) if request.tools else 0}")
 
-            # Run model.generate() in executor to not block the event loop
             loop = asyncio.get_event_loop()
-            response_text, prompt_tokens, completion_tokens = await loop.run_in_executor(
-                None,
-                functools.partial(
-                    generate_response,
-                    user_message, system_message, temperature, max_tokens
-                )
+
+            def _unlink_temp_image():
+                if image_path:
+                    try:
+                        os.unlink(image_path)
+                    except OSError:
+                        pass
+
+            is_vision = (
+                state["model_type"] == "vision"
+                and state.get("processor") is not None
             )
 
-            # Always clean thinking tags from response
-            response_text = clean_tool_calls_from_text(response_text)
-
-            print(f"[DEBUG] Full response:\n{response_text[:500] if response_text else 'empty'}")
-
             # ----------------------------------------------------------------
-            # STREAMING MODE - send full response as SSE chunks
+            # STREAMING — token SSE for text (TextIteratorStreamer); one chunk for VL
             # ----------------------------------------------------------------
             if request.stream:
-                async def stream_response():
-                    chat_id = f"chatcmpl-{uuid.uuid4().hex[:8]}"
-                    created = int(time.time())
-                    # Send the full response as a single content chunk
-                    chunk = {
-                        "id": chat_id,
-                        "object": "chat.completion.chunk",
-                        "created": created,
-                        "model": state["model_name"],
-                        "choices": [{
-                            "index": 0,
-                            "delta": {"content": response_text},
-                            "finish_reason": None
-                        }]
-                    }
-                    yield f"data: {json.dumps(chunk)}\n\n"
-                    # Send final chunk with finish_reason
-                    final_chunk = {
-                        "id": chat_id,
-                        "object": "chat.completion.chunk",
-                        "created": created,
-                        "model": state["model_name"],
-                        "choices": [{
-                            "index": 0,
-                            "delta": {},
-                            "finish_reason": "stop"
-                        }]
-                    }
-                    yield f"data: {json.dumps(final_chunk)}\n\n"
-                    yield "data: [DONE]\n\n"
+                if is_vision:
+                    async def stream_vision_single_chunk():
+                        try:
+                            rt, _pt, _ct = await loop.run_in_executor(
+                                None,
+                                functools.partial(
+                                    generate_response,
+                                    user_message,
+                                    system_message,
+                                    temperature,
+                                    max_tokens,
+                                    image_path,
+                                ),
+                            )
+                            rt = clean_tool_calls_from_text(rt)
+                            chat_id = f"chatcmpl-{uuid.uuid4().hex[:8]}"
+                            created = int(time.time())
+                            chunk = {
+                                "id": chat_id,
+                                "object": "chat.completion.chunk",
+                                "created": created,
+                                "model": state["model_name"],
+                                "choices": [{
+                                    "index": 0,
+                                    "delta": {"content": rt},
+                                    "finish_reason": None,
+                                }],
+                            }
+                            yield f"data: {json.dumps(chunk)}\n\n"
+                            final_chunk = {
+                                "id": chat_id,
+                                "object": "chat.completion.chunk",
+                                "created": created,
+                                "model": state["model_name"],
+                                "choices": [{
+                                    "index": 0,
+                                    "delta": {},
+                                    "finish_reason": "stop",
+                                }],
+                            }
+                            yield f"data: {json.dumps(final_chunk)}\n\n"
+                            yield "data: [DONE]\n\n"
+                        finally:
+                            _unlink_temp_image()
+
+                    return StreamingResponse(
+                        stream_vision_single_chunk(),
+                        media_type="text/event-stream",
+                    )
+
+                if state.get("tokenizer") is None:
+                    raise HTTPException(
+                        status_code=400,
+                        detail="Streaming requires a text tokenizer (vision-only model loaded)",
+                    )
+
+                async def stream_text_tokens():
+                    from threading import Thread
+                    from transformers import TextIteratorStreamer
+
+                    try:
+                        tok = state["tokenizer"]
+                        mdl = state["model"]
+                        chat_messages = []
+                        if system_message:
+                            chat_messages.append({
+                                "role": "system",
+                                "content": system_message,
+                            })
+                        chat_messages.append({
+                            "role": "user",
+                            "content": user_message,
+                        })
+                        inputs = tok.apply_chat_template(
+                            chat_messages,
+                            add_generation_prompt=True,
+                            return_tensors="pt",
+                            tokenize=True,
+                        )
+                        input_ids = inputs["input_ids"].to(mdl.device)
+                        attention_mask = inputs["attention_mask"].to(mdl.device)
+                        streamer = TextIteratorStreamer(
+                            tok, skip_prompt=True, skip_special_tokens=True
+                        )
+                        gkw = _text_generate_kwargs(temperature, max_tokens)
+                        gen_kw = {
+                            "input_ids": input_ids,
+                            "attention_mask": attention_mask,
+                            "streamer": streamer,
+                            **gkw,
+                        }
+                        producer = Thread(
+                            target=lambda: mdl.generate(**gen_kw),
+                            daemon=True,
+                        )
+                        producer.start()
+                        chat_id = f"chatcmpl-{uuid.uuid4().hex[:8]}"
+                        created = int(time.time())
+                        it = iter(streamer)
+                        _done = object()
+
+                        def _next_piece():
+                            try:
+                                return next(it)
+                            except StopIteration:
+                                return _done
+
+                        while True:
+                            piece = await loop.run_in_executor(None, _next_piece)
+                            if piece is _done:
+                                break
+                            if piece:
+                                chunk = {
+                                    "id": chat_id,
+                                    "object": "chat.completion.chunk",
+                                    "created": created,
+                                    "model": state["model_name"],
+                                    "choices": [{
+                                        "index": 0,
+                                        "delta": {"content": piece},
+                                        "finish_reason": None,
+                                    }],
+                                }
+                                yield f"data: {json.dumps(chunk)}\n\n"
+                        producer.join()
+                        final_chunk = {
+                            "id": chat_id,
+                            "object": "chat.completion.chunk",
+                            "created": created,
+                            "model": state["model_name"],
+                            "choices": [{
+                                "index": 0,
+                                "delta": {},
+                                "finish_reason": "stop",
+                            }],
+                        }
+                        yield f"data: {json.dumps(final_chunk)}\n\n"
+                        yield "data: [DONE]\n\n"
+                    finally:
+                        _unlink_temp_image()
 
                 return StreamingResponse(
-                    stream_response(),
-                    media_type="text/event-stream"
+                    stream_text_tokens(),
+                    media_type="text/event-stream",
                 )
 
             # ----------------------------------------------------------------
-            # NON-STREAMING MODE
+            # NON-STREAMING
             # ----------------------------------------------------------------
-            # Parse tool calls from response if tools were requested
+            try:
+                response_text, prompt_tokens, completion_tokens = (
+                    await loop.run_in_executor(
+                        None,
+                        functools.partial(
+                            generate_response,
+                            user_message,
+                            system_message,
+                            temperature,
+                            max_tokens,
+                            image_path,
+                        ),
+                    )
+                )
+            finally:
+                _unlink_temp_image()
+
+            response_text = clean_tool_calls_from_text(response_text)
+
+            print(
+                f"[DEBUG] Full response:\n"
+                f"{response_text[:500] if response_text else 'empty'}"
+            )
+
             tool_calls = []
             if request.tools:
                 tool_calls = parse_tool_calls(response_text)
                 print(f"[DEBUG] Tool calls found: {len(tool_calls)}")
                 if tool_calls:
                     print(f"[DEBUG] Parsed tool: {tool_calls[0]}")
-                if tool_calls:
-                    # Clean tool call syntax from the text
                     response_text = clean_tool_calls_from_text(response_text)
 
-            # Build OpenAI-format response
             if tool_calls:
-                # Response with tool calls
                 return {
                     "id": f"chatcmpl-{uuid.uuid4().hex[:8]}",
                     "object": "chat.completion",
@@ -896,37 +1228,35 @@ def run_server_mode(model, tokenizer, model_name, model_type,
                         "message": {
                             "role": "assistant",
                             "content": response_text if response_text else None,
-                            "tool_calls": tool_calls
+                            "tool_calls": tool_calls,
                         },
-                        "finish_reason": "tool_calls"
+                        "finish_reason": "tool_calls",
                     }],
                     "usage": {
                         "prompt_tokens": prompt_tokens,
                         "completion_tokens": completion_tokens,
-                        "total_tokens": prompt_tokens + completion_tokens
-                    }
+                        "total_tokens": prompt_tokens + completion_tokens,
+                    },
                 }
-            else:
-                # Regular response without tool calls
-                return ChatCompletionResponse(
-                    id=f"chatcmpl-{uuid.uuid4().hex[:8]}",
-                    created=int(time.time()),
-                    model=state["model_name"],
-                    choices=[
-                        ChatCompletionChoice(
-                            index=0,
-                            message=ChatMessage(
-                                role="assistant", content=response_text
-                            ),
-                            finish_reason="stop"
-                        )
-                    ],
-                    usage=Usage(
-                        prompt_tokens=prompt_tokens,
-                        completion_tokens=completion_tokens,
-                        total_tokens=prompt_tokens + completion_tokens
+            return ChatCompletionResponse(
+                id=f"chatcmpl-{uuid.uuid4().hex[:8]}",
+                created=int(time.time()),
+                model=state["model_name"],
+                choices=[
+                    ChatCompletionChoice(
+                        index=0,
+                        message=ChatMessage(
+                            role="assistant", content=response_text
+                        ),
+                        finish_reason="stop",
                     )
-                )
+                ],
+                usage=Usage(
+                    prompt_tokens=prompt_tokens,
+                    completion_tokens=completion_tokens,
+                    total_tokens=prompt_tokens + completion_tokens,
+                ),
+            )
 
         except HTTPException:
             raise
@@ -986,18 +1316,215 @@ def run_server_mode(model, tokenizer, model_name, model_type,
 
 
 # ============================================================================
-# Interactive Mode - Quick local testing with transformers
+# Interactive Mode — text or VL (lfm_thinking.py parity, transformers only)
 # ============================================================================
-def run_interactive_mode(model, tokenizer, model_name):
+def run_interactive_mode(model, tokenizer, processor, model_name, model_type):
     """
-    Simple interactive chat using transformers.
-    For quick testing without starting the full server.
-    Type 'model' or 'switch' to hot-swap models.
+    Local terminal chat: text models use streaming TextStreamer; VL models
+    get image / video / text-only menus (same UX as lfm_thinking non-MLX path).
     """
     from transformers import TextStreamer
 
-    streamer = TextStreamer(tokenizer, skip_prompt=True, skip_special_tokens=True)
+    def _vl_generate(inputs_dict, max_new_tokens):
+        """Gemma-friendly VLM generate (interactive)."""
+        if "gemma" in model_name.lower():
+            return model.generate(
+                **inputs_dict,
+                do_sample=True,
+                temperature=1.0,
+                top_p=0.95,
+                top_k=64,
+                max_new_tokens=max_new_tokens,
+            )
+        return model.generate(
+            **inputs_dict,
+            do_sample=True,
+            temperature=0.7,
+            max_new_tokens=max_new_tokens,
+        )
 
+    if model_type == "vision" and processor is not None:
+        print(f"\n{model_name} Interactive Chat (Vision — transformers)")
+        print("=" * 50)
+        while True:
+            try:
+                media_choice = input(
+                    "Media? [i]mage, [v]ideo, [n]one, [m]odel switch, or [q]uit: "
+                ).strip().lower()
+
+                if media_choice in {"q", "quit", "exit"}:
+                    print("Goodbye!")
+                    return False
+                if media_choice in {"m", "model", "switch"}:
+                    return True
+
+                if media_choice in {"v", "video"}:
+                    print("Opening file dialog for video...")
+                    video_path = filedialog.askopenfilename(
+                        title="Select a video",
+                        filetypes=[
+                            ("Video files", "*.mp4 *.avi *.mov *.mkv *.webm"),
+                            ("MP4", "*.mp4"),
+                            ("All files", "*.*"),
+                        ],
+                    )
+                    if not video_path:
+                        print("No video selected.")
+                        continue
+                    cap = cv2.VideoCapture(video_path)
+                    if not cap.isOpened():
+                        print("Error: Could not open video.")
+                        continue
+                    fps = cap.get(cv2.CAP_PROP_FPS)
+                    total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+                    print(f"Video: {fps:.1f} FPS, {total_frames} frames")
+                    interval_input = input(
+                        "Analyze every N seconds (default=2): "
+                    ).strip()
+                    interval_seconds = float(interval_input) if interval_input else 2.0
+                    frame_interval = max(1, int(fps * interval_seconds))
+                    user_input = input("Prompt: ").strip()
+                    if not user_input:
+                        user_input = "Describe what you see in this frame."
+                    video_results = []
+                    video_name = os.path.basename(video_path)
+                    frame_count = 0
+                    scene_count = 0
+                    start_time = time.time()
+                    while True:
+                        ret, frame = cap.read()
+                        if not ret:
+                            break
+                        if frame_count % frame_interval == 0:
+                            scene_count += 1
+                            timestamp = frame_count / fps if fps else 0
+                            frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                            pil_image = Image.fromarray(frame_rgb)
+                            conversation = [{
+                                "role": "user",
+                                "content": [
+                                    {"type": "image", "image": pil_image},
+                                    {"type": "text", "text": user_input},
+                                ],
+                            }]
+                            inputs = processor.apply_chat_template(
+                                conversation,
+                                add_generation_prompt=True,
+                                return_tensors="pt",
+                                return_dict=True,
+                                tokenize=True,
+                            ).to(model.device)
+                            outputs = _vl_generate(inputs, 128)
+                            response = processor.batch_decode(
+                                outputs, skip_special_tokens=True
+                            )[0]
+                            if "assistant" in response.lower():
+                                response = response.split("assistant")[-1].strip()
+                            print(f"\n[{timestamp:.1f}s] Scene {scene_count}:\n  {response}")
+                            speak(response)
+                            video_results.append({
+                                "timestamp": timestamp,
+                                "scene": scene_count,
+                                "description": response,
+                            })
+                        frame_count += 1
+                    cap.release()
+                    elapsed = time.time() - start_time
+                    print(f"\nAnalysis complete: {scene_count} scenes in {elapsed:.1f}s")
+                    if scene_count > 0:
+                        print(f"Average: {elapsed/scene_count:.2f}s per scene")
+                    save_choice = input("Save results? (y/n): ").strip().lower()
+                    if save_choice in {"y", "yes"} and video_results:
+                        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+                        out_fn = f"{os.path.splitext(video_name)[0]}_analysis_{ts}.txt"
+                        with open(out_fn, "w") as f:
+                            f.write(f"Video Analysis: {video_name}\nPrompt: {user_input}\n\n")
+                            for r in video_results:
+                                f.write(f"[{r['timestamp']:.1f}s] Scene {r['scene']}:\n  {r['description']}\n\n")
+                        print(f"Saved to: {out_fn}")
+
+                elif media_choice in {"i", "image"}:
+                    image_path = filedialog.askopenfilename(
+                        title="Select an image",
+                        filetypes=[
+                            ("Image files", "*.png *.jpg *.jpeg *.gif *.bmp *.webp"),
+                            ("All files", "*.*"),
+                        ],
+                    )
+                    if not image_path:
+                        print("No image selected.")
+                        continue
+                    user_input = input("Prompt: ").strip()
+                    if not user_input:
+                        user_input = "Describe what you see in this image."
+                    try:
+                        image = Image.open(image_path)
+                        conversation = [{
+                            "role": "user",
+                            "content": [
+                                {"type": "image", "image": image},
+                                {"type": "text", "text": user_input},
+                            ],
+                        }]
+                    except Exception as img_err:
+                        print(f"Error loading image: {img_err}")
+                        continue
+                    print("Assistant: ", end="", flush=True)
+                    inputs = processor.apply_chat_template(
+                        conversation,
+                        add_generation_prompt=True,
+                        return_tensors="pt",
+                        return_dict=True,
+                        tokenize=True,
+                    ).to(model.device)
+                    outputs = _vl_generate(inputs, 512)
+                    response = processor.batch_decode(
+                        outputs, skip_special_tokens=True
+                    )[0]
+                    if "assistant" in response.lower():
+                        response = response.split("assistant")[-1].strip()
+                    print(response)
+                    speak(response)
+                    print("\n" + "=" * 50)
+
+                elif media_choice in {"n", "none", ""}:
+                    user_input = input("Prompt: ").strip()
+                    if not user_input:
+                        print("Please enter a prompt...")
+                        continue
+                    conversation = [{
+                        "role": "user",
+                        "content": [{"type": "text", "text": user_input}],
+                    }]
+                    print("Assistant: ", end="", flush=True)
+                    inputs = processor.apply_chat_template(
+                        conversation,
+                        add_generation_prompt=True,
+                        return_tensors="pt",
+                        return_dict=True,
+                        tokenize=True,
+                    ).to(model.device)
+                    outputs = _vl_generate(inputs, 512)
+                    response = processor.batch_decode(
+                        outputs, skip_special_tokens=True
+                    )[0]
+                    if "assistant" in response.lower():
+                        response = response.split("assistant")[-1].strip()
+                    print(response)
+                    speak(response)
+                    print("\n" + "=" * 50)
+                else:
+                    print("Invalid choice. Use: i, v, n, m, or q")
+
+            except KeyboardInterrupt:
+                print("\n\nInterrupted.")
+                continue
+            except Exception as e:
+                print(f"\nError: {type(e).__name__}: {e}")
+                continue
+
+    # --- Text-only model ---
+    streamer = TextStreamer(tokenizer, skip_prompt=True, skip_special_tokens=True)
     print(f"\n{model_name} Interactive Chat (transformers)")
     print("=" * 50)
     print("Enter prompts below. Type 'quit' to exit, 'model' to switch models.")
@@ -1009,16 +1536,15 @@ def run_interactive_mode(model, tokenizer, model_name):
 
             if user_input.lower() in {"quit", "exit", "q"}:
                 print("Goodbye!")
-                return False  # Don't switch, just exit
+                return False
 
             if user_input.lower() in {"model", "switch", "m"}:
-                return True  # Signal to switch models
+                return True
 
             if not user_input:
                 print("Please enter a prompt...")
                 continue
 
-            # Apply chat template
             messages = [{"role": "user", "content": user_input}]
             inputs = tokenizer.apply_chat_template(
                 messages,
@@ -1030,16 +1556,27 @@ def run_interactive_mode(model, tokenizer, model_name):
             attention_mask = inputs["attention_mask"].to(model.device)
 
             print("Assistant: ", end="", flush=True)
-            output = model.generate(
-                input_ids=input_ids,
-                attention_mask=attention_mask,
-                do_sample=True,
-                temperature=0.7,
-                max_new_tokens=2048,
-                streamer=streamer,
-            )
+            if "gemma" in model_name.lower():
+                output = model.generate(
+                    input_ids=input_ids,
+                    attention_mask=attention_mask,
+                    do_sample=True,
+                    temperature=1.0,
+                    top_p=0.95,
+                    top_k=64,
+                    max_new_tokens=2048,
+                    streamer=streamer,
+                )
+            else:
+                output = model.generate(
+                    input_ids=input_ids,
+                    attention_mask=attention_mask,
+                    do_sample=True,
+                    temperature=0.7,
+                    max_new_tokens=2048,
+                    streamer=streamer,
+                )
 
-            # TTS: speak the response
             if TTS_ENABLED:
                 response_text = tokenizer.decode(
                     output[0][input_ids.shape[-1]:], skip_special_tokens=True
@@ -1062,7 +1599,12 @@ def run_interactive_mode(model, tokenizer, model_name):
 # ============================================================================
 def main():
     import torch
-    from transformers import AutoModelForCausalLM, AutoTokenizer
+    from transformers import (
+        AutoModelForCausalLM,
+        AutoModelForImageTextToText,
+        AutoProcessor,
+        AutoTokenizer,
+    )
 
     switch_model = True
     cli_model_used = False
@@ -1142,19 +1684,33 @@ def main():
                     print("Continuing without TTS")
 
         # ----------------------------------------------------------------
-        # Load Model
+        # Load Model (text vs vision — lfm_thinking transformers split)
         # ----------------------------------------------------------------
         print(f"\nLoading {selected_desc} with transformers...")
-        tokenizer = AutoTokenizer.from_pretrained(
-            selected_path, trust_remote_code=True, local_files_only=True
-        )
-        model = AutoModelForCausalLM.from_pretrained(
-            selected_path,
-            torch_dtype="auto",
-            device_map="auto",
-            trust_remote_code=True,
-            local_files_only=True,
-        )
+        tokenizer = None
+        processor = None
+        if selected_type == "vision":
+            processor = AutoProcessor.from_pretrained(
+                selected_path, trust_remote_code=True, local_files_only=True
+            )
+            model = AutoModelForImageTextToText.from_pretrained(
+                selected_path,
+                torch_dtype="auto",
+                device_map="auto",
+                trust_remote_code=True,
+                local_files_only=True,
+            )
+        else:
+            tokenizer = AutoTokenizer.from_pretrained(
+                selected_path, trust_remote_code=True, local_files_only=True
+            )
+            model = AutoModelForCausalLM.from_pretrained(
+                selected_path,
+                torch_dtype="auto",
+                device_map="auto",
+                trust_remote_code=True,
+                local_files_only=True,
+            )
         print(f"Model loaded on {model.device} (dtype: {model.dtype})")
 
         # ----------------------------------------------------------------
@@ -1162,18 +1718,23 @@ def main():
         # ----------------------------------------------------------------
         if run_as_server:
             run_server_mode(
-                model, tokenizer, selected_desc, selected_type,
+                model, tokenizer, processor, selected_desc, selected_type,
                 host=cli_args.host, port=server_port
             )
             break  # Exit after server stops
         else:
-            switch_model = run_interactive_mode(model, tokenizer, selected_desc)
+            switch_model = run_interactive_mode(
+                model, tokenizer, processor, selected_desc, selected_type
+            )
 
         # Clean up if switching models
         if switch_model:
             print("\nClearing model from memory...")
             del model
-            del tokenizer
+            if tokenizer is not None:
+                del tokenizer
+            if processor is not None:
+                del processor
             clear_model_memory()
 
 

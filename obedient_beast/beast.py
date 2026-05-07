@@ -769,11 +769,11 @@ TOOLS = [
         }
     },
     # ---------------------------------------------------------------------------
-    # Art Generation — FLUX.2-klein-4B text-to-image on Apple Silicon
+    # Art Generation — FLUX (macOS Apple Silicon) / Z-Image-Turbo (Linux CUDA)
     # ---------------------------------------------------------------------------
     {
         "name": "generate_art",
-        "description": "Generate an image from a text prompt using FLUX.2-klein-4B AI art model running locally on Apple Silicon. Use when the user asks to draw, paint, create art, generate an image, or make a picture. Returns the file path of the generated PNG. Image is auto-sent via WhatsApp.",
+        "description": "Generate an image from a text prompt using a local model: on macOS Apple Silicon, FLUX.2-klein (MLX+mflux); on Linux with NVIDIA CUDA, Z-Image-Turbo (PyTorch+diffusers). Use when the user asks to draw, paint, create art, generate an image, or make a picture. Returns the file path of the generated PNG. Image is auto-sent via WhatsApp.",
         "params": {
             "prompt": "Text description of the image to generate (be detailed and descriptive)",
             "width": "Optional: image width in pixels (default 512)",
@@ -1289,7 +1289,7 @@ def execute_tool(name: str, args: dict) -> str:
             _sandbox_log("run_html", str(sandbox_dir), html, final_result)
             return final_result
 
-        # === Art Generation (FLUX.2-klein-4B) ===
+        # === Art Generation: FLUX (darwin) / Z-Image-Turbo diffusers (linux) ===
         elif name == "generate_art":
             prompt = args.get("prompt", "").strip()
             if not prompt:
@@ -1306,10 +1306,13 @@ def execute_tool(name: str, args: dict) -> str:
                 except (TypeError, ValueError):
                     seed = None
 
-            # Import from flux_art.py in the parent directory
+            # Parent dir holds flux_art.py (macOS) and zimage_art_linux.py (else).
             sys.path.insert(0, str(Path(__file__).parent.parent))
             try:
-                from flux_art import generate_image
+                if sys.platform == "darwin":
+                    from flux_art import generate_image
+                else:
+                    from zimage_art_linux import generate_image
                 filepath = generate_image(
                     prompt=prompt,
                     width=width,

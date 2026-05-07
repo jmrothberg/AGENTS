@@ -1,0 +1,20 @@
+# Optional: Z-Image-Turbo stack for Beast generate_art on Linux (non-darwin).
+# Do NOT pip install -r this alone — torch must match your CUDA driver.
+#
+# Recommended: use the same recipe as Agent_learning (proven on Blackwell):
+#   TORCH_CUDA=130 ./path/to/Agent_learning/scripts/install_diffuser.sh
+# in your Beast venv, then:
+#   pip install -r requirements-zimage-linux.txt
+#
+# Or manually:
+#   pip install --pre --index-url https://download.pytorch.org/whl/nightly/cu130 \
+#       torch torchvision torchaudio
+#   pip install --upgrade git+https://github.com/huggingface/diffusers
+#   pip install -r requirements-zimage-linux.txt
+#
+# ZImagePipeline may require diffusers from git until a stable release includes it.
+
+transformers>=4.40.0
+accelerate>=0.30.0
+safetensors>=0.4.0
+pillow>=10.0.0
