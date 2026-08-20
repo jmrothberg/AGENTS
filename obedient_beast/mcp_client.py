@@ -47,9 +47,9 @@ import queue
 from pathlib import Path
 from typing import Optional
 from dataclasses import dataclass, field
-from dotenv import load_dotenv
+from capabilities import load_beast_env
 
-load_dotenv()
+load_beast_env()
 
 # ---------------------------------------------------------------------------
 # MCP Configuration
@@ -143,6 +143,10 @@ class MCPClient:
                 print(f"[MCP] Started server: {name} (tier: {server_tier})")
             except Exception as e:
                 print(f"[MCP] Failed to start {name}: {e}")
+                # Drop a hung/dead process so later servers still start
+                srv = self.servers.pop(name, None)
+                if srv and srv.process and srv.process.poll() is None:
+                    srv.process.kill()
 
     def _start_server(self, name: str, config: dict):
         """
@@ -157,14 +161,18 @@ class MCPClient:
         # (e.g., BRAVE_API_KEY for brave-search)
         env = os.environ.copy()
         for key, value in config.get("env", {}).items():
-            env[key] = value
+            # Prefer process env (BRAVE_API_KEY from .env) over a key baked into JSON
+            if os.environ.get(key):
+                env[key] = os.environ[key]
+            elif value:
+                env[key] = value
 
         # Start the server process with JSON-RPC over stdio
         process = subprocess.Popen(
             command,
             stdin=subprocess.PIPE,   # We write JSON-RPC requests here
             stdout=subprocess.PIPE,  # We read JSON-RPC responses here
-            stderr=subprocess.PIPE,  # Captured but not actively read (avoid blocking)
+            stderr=subprocess.PIPE,  # Drained below so npx/server logs cannot fill the pipe
             env=env,
             text=True,
             bufsize=1  # Line-buffered for JSON-RPC (one JSON object per line)
@@ -172,6 +180,16 @@ class MCPClient:
 
         blocked_tools = config.get("blocked_tools", [])
         server = MCPServer(name=name, command=command, process=process, blocked_tools=blocked_tools)
+
+        # Drain stderr. PIPE without a reader deadlocks when npx prints download progress.
+        def drain_stderr():
+            try:
+                while process.stderr and process.stderr.readline():
+                    pass
+            except Exception:
+                pass
+
+        threading.Thread(target=drain_stderr, daemon=True).start()
 
         # Start a dedicated reader thread for this server.
         # The thread reads JSON-RPC responses from stdout and puts them on

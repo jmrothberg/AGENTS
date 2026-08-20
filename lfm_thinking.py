@@ -22,7 +22,7 @@ PM2 (process manager) — copy/paste to start as a managed background service:
   pm2 start /Users/jonathanrothberg/Agents/lfm_thinking.py \
     --name lfm-thinking --interpreter python3 \
     --max-restarts 3 --restart-delay 10000 \
-    -- --model Qwen3.5-122B --server
+    -- --model Qwen3.8-27B-mxfp8 --server
 
   NOTE: --max-restarts 3 prevents infinite crash loops (large models can
   take a long time to load). --restart-delay 10000 gives 10s between retries.
@@ -37,6 +37,15 @@ PM2 (process manager) — copy/paste to start as a managed background service:
 
 import platform
 import os
+
+def _lfm_verbose() -> bool:
+    """LFM_VERBOSE=1 enables parse/prompt debug prints. Off by default."""
+    return os.environ.get("LFM_VERBOSE", "").strip().lower() in ("1", "true", "yes", "on")
+
+
+def _dbg(msg: str):
+    if _lfm_verbose():
+        print(msg)
 
 # Platform-specific imports and paths
 IS_MACOS = platform.system() == "Darwin"
@@ -219,6 +228,13 @@ def scan_mlx_models(models_dir):
     
     return models
 
+
+def refresh_mlx_models():
+    """Re-scan MLX_Models on disk. Import-time cache goes stale if folders are moved/deleted."""
+    global MLX_MODELS
+    MLX_MODELS = scan_mlx_models(MLX_MODELS_DIR)
+
+
 # Scan models dynamically at startup
 MLX_MODELS = scan_mlx_models(MLX_MODELS_DIR)
 
@@ -244,6 +260,7 @@ def resolve_model_choice(model_arg):
     - string: fuzzy match against model folder names (case-insensitive)
     Returns the model key (string number) or None if no match.
     """
+    refresh_mlx_models()
     if not MLX_MODELS:
         print("Error: No models found in", MLX_MODELS_DIR)
         exit(1)
@@ -293,6 +310,7 @@ def resolve_model_choice(model_arg):
 
 # Handle --list
 if cli_args.list:
+    refresh_mlx_models()
     print("=" * 50)
     print("Available Models")
     print("=" * 50)
@@ -353,6 +371,7 @@ def run_server_mode(model, tokenizer, processor, model_name, model_type, host="0
         role: str
         content: Union[str, List, None] = None
         tool_calls: Optional[List[dict]] = None
+        reasoning_content: Optional[str] = None  # Qwen <think> extracted from visible text
     
     class ChatCompletionRequest(BaseModel):
         model: str = "auto"
@@ -361,6 +380,7 @@ def run_server_mode(model, tokenizer, processor, model_name, model_type, host="0
         max_tokens: Optional[int] = 512
         stream: Optional[bool] = False
         tools: Optional[List[dict]] = None  # Tool definitions for function calling
+        chat_template_kwargs: Optional[dict] = None  # Qwen3.8 enable_thinking / preserve_thinking / reasoning_effort
     
     class ChatCompletionChoice(BaseModel):
         index: int
@@ -408,74 +428,23 @@ def run_server_mode(model, tokenizer, processor, model_name, model_type, host="0
     # -------------------------------------------------------------------------
     
     def format_tools_for_prompt(tools):
-        """
-        Format tools into a clear prompt for the model.
-
-        Priority tools are listed FIRST so the model sees them.
-        run_python and run_html are highlighted as the PREFERRED tools
-        for code generation — the model must understand to use them
-        instead of shell/write_file.
-        """
+        """Short format reminder. The OpenAI tools array is the catalog."""
         if not tools:
             return ""
-
-        # Priority tools — these appear first and get full descriptions.
-        # run_python and run_html MUST be here or the model won't use them.
-        priority_names = [
-            "generate_art", "run_python", "run_html",
-            "shell", "read_file", "write_file", "edit_file", "list_dir",
-            "screenshot", "add_task", "recall_memory", "fetch_url",
-            "browser_goto", "browser_read",
-            "spawn_agent", "list_skills", "use_skill",
-        ]
-
-        # Build: priority tools with params, then a short list of the rest
-        priority_lines = []
-        other_names = []
-        seen = set()
-
-        for pname in priority_names:
-            for tool in tools:
-                func = tool.get("function", tool)
-                name = func.get("name", "unknown")
-                if name == pname and name not in seen:
-                    seen.add(name)
-                    desc = func.get("description", "")[:80]
-                    params = func.get("parameters", {}).get("properties", {})
-                    param_names = ", ".join(params.keys())
-                    priority_lines.append(f"- {name}({param_names}): {desc}")
-
-        for tool in tools:
-            func = tool.get("function", tool)
-            name = func.get("name", "unknown")
-            if name not in seen:
-                other_names.append(name)
-                seen.add(name)
-
-        lines = [
-            "## Available Tools",
-            "Call a tool by outputting JSON in this format:",
-            '```tool_call',
+        return "\n".join([
+            "## Tools",
+            "Call tools with JSON:",
+            "```tool_call",
             '{"name": "tool_name", "arguments": {"param": "value"}}',
-            '```',
+            "```",
+            "Or Qwen native: <tool_call>{\"name\": \"...\", \"arguments\": {...}}</tool_call>",
             "",
-            "**IMPORTANT: For Python code use run_python. For HTML pages use run_html. Do NOT use shell or write_file for code.**",
-            "",
-            "**Primary tools:**",
-        ]
-        lines.extend(priority_lines)
-        if other_names:
-            lines.append(f"\n**Other tools ({len(other_names)}):** " + ", ".join(other_names[:20]))
-            if len(other_names) > 20:
-                lines.append(f"  ...and {len(other_names) - 20} more")
-        lines.append("\nRULES:")
-        lines.append("- You MUST call a tool when the user asks you to do something. Never just describe what you would do.")
-        lines.append("- For drawing/art/images: ALWAYS use generate_art. Put a detailed description in the 'prompt' argument.")
-        lines.append("- For Python code: ALWAYS use run_python. Put the code in the 'code' argument. NEVER output ```python blocks — the user cannot run those.")
-        lines.append("- For HTML/JS: ALWAYS use run_html. Put the HTML in the 'html' argument. NEVER use write_file.")
-        lines.append("- Output ONLY the ```tool_call block. No explanation before or after.")
-
-        return "\n".join(lines)
+            "RULES:",
+            "- Answer in text unless you need to act.",
+            "- You may call several independent tools in one turn.",
+            "- For Python use run_python. For HTML use run_html. For images use generate_art.",
+            "- Never retry a tool call that already succeeded. When the task is done, answer in text.",
+        ])
 
     def parse_tool_calls(text):
         """
@@ -487,6 +456,10 @@ def run_server_mode(model, tokenizer, processor, model_name, model_type, host="0
         - Unescaped control characters
         We handle these with a repair step after extraction.
         """
+        if text is None:
+            return []
+        if not isinstance(text, str):
+            text = str(text)
         tool_calls = []
 
         def _extract_json(s, start=0):
@@ -582,22 +555,22 @@ def run_server_mode(model, tokenizer, processor, model_name, model_type, host="0
             try:
                 return json.loads(blob)
             except json.JSONDecodeError as e:
-                print(f"[DEBUG] {label} json.loads failed: {e}")
+                _dbg(f"[DEBUG] {label} json.loads failed: {e}")
                 # Repair: fix newlines/tabs inside strings
                 repaired = _repair_json(blob)
                 try:
                     data = json.loads(repaired)
-                    print(f"[DEBUG] {label} json.loads succeeded after repair")
+                    _dbg(f"[DEBUG] {label} json.loads succeeded after repair")
                     return data
                 except json.JSONDecodeError as e2:
-                    print(f"[DEBUG] {label} json.loads STILL failed after repair: {e2}")
-                    print(f"[DEBUG] {label} blob[:200] = {blob[:200]}")
+                    _dbg(f"[DEBUG] {label} json.loads STILL failed after repair: {e2}")
+                    _dbg(f"[DEBUG] {label} blob[:200] = {blob[:200]}")
                     return None
 
         # Pattern A: ```tool_call or ```tool fenced blocks
         for m in re.finditer(r'```tool(?:_call)?\s*\n', text):
             blob, _ = _extract_json(text, m.end())
-            print(f"[DEBUG] Pattern A: fence at {m.start()}, blob={'found '+str(len(blob))+' chars' if blob else 'None'}")
+            _dbg(f"[DEBUG] Pattern A: fence at {m.start()}, blob={'found '+str(len(blob))+' chars' if blob else 'None'}")
             data = _try_parse(blob, "Pattern A")
             if data and "name" in data:
                 try_add(data)
@@ -618,11 +591,15 @@ def run_server_mode(model, tokenizer, processor, model_name, model_type, host="0
                 if data and "name" in data:
                     try_add(data)
 
-        # Only return first tool call to prevent loops
-        return tool_calls[:1]
+        # Return all parsed calls — Beast executes them sequentially and has loop detection.
+        return tool_calls
 
     def clean_tool_calls_from_text(text):
         """Remove tool call blocks and thinking tags from text."""
+        if text is None:
+            return ""
+        if not isinstance(text, str):
+            text = str(text)
         # Remove ```tool_call blocks
         text = re.sub(r'```tool_call\s*\n[\s\S]*?\n```', '', text)
         # Remove ```tool blocks (GLM Flash variant)
@@ -632,7 +609,31 @@ def run_server_mode(model, tokenizer, processor, model_name, model_type, host="0
         # Remove <think> blocks (Qwen thinking)
         text = re.sub(r'<think>[\s\S]*?</think>', '', text)
         return text.strip()
-    
+
+    def split_thinking(text):
+        """Pull Qwen <think> out of the model output. Visible text is what the user sees."""
+        if not text:
+            return "", ""
+        m = re.search(r'<think>([\s\S]*?)</think>', text)
+        if not m:
+            return text, ""
+        visible = (text[:m.start()] + text[m.end():]).strip()
+        return visible, m.group(1).strip()
+
+    def apply_text_chat_template(messages, request=None):
+        """apply_chat_template, forwarding Qwen3.8 kwargs when the tokenizer accepts them."""
+        tok = state["tokenizer"]
+        if tok.chat_template is None:
+            return None
+        base = dict(add_generation_prompt=True, return_dict=False, tokenize=False)
+        extra = {}
+        if request is not None and getattr(request, "chat_template_kwargs", None):
+            extra = dict(request.chat_template_kwargs)
+        try:
+            return tok.apply_chat_template(messages, **base, **extra)
+        except TypeError:
+            return tok.apply_chat_template(messages, **base)
+
     @app.get("/")
     async def root():
         """Health check endpoint."""
@@ -648,6 +649,7 @@ def run_server_mode(model, tokenizer, processor, model_name, model_type, host="0
     @app.get("/v1/models/available")
     async def available_models():
         """List all models that can be loaded (from MLX_Models directory)."""
+        refresh_mlx_models()
         available = []
         for key, (path, mtype, desc) in MLX_MODELS.items():
             mtime = os.path.getmtime(path)
@@ -729,8 +731,9 @@ def run_server_mode(model, tokenizer, processor, model_name, model_type, host="0
         # Prepare prompt with chat template
         messages = [{"role": "user", "content": user_message}]
         if state["tokenizer"].chat_template is not None:
+            # tokenize=False → str prompt; tokenize=True can return ids/tensors mlx_lm mishandles.
             prompt = state["tokenizer"].apply_chat_template(
-                messages, add_generation_prompt=True, return_dict=False,
+                messages, add_generation_prompt=True, return_dict=False, tokenize=False,
             )
         else:
             prompt = user_message
@@ -898,17 +901,10 @@ def run_server_mode(model, tokenizer, processor, model_name, model_type, host="0
             
             # Add tool definitions to the prompt if provided
             tools_prompt = format_tools_for_prompt(request.tools) if request.tools else ""
-            print(f"[DEBUG] Tools received: {len(request.tools) if request.tools else 0}")
+            _dbg(f"[DEBUG] Tools received: {len(request.tools) if request.tools else 0}")
             if tools_prompt:
-                print(f"[DEBUG] Tools prompt ({len(tools_prompt)} chars):\n{tools_prompt[:500]}")
-                # Put tool instruction AFTER user request for better attention
-                tool_instruction = (
-                    f"\n\n{tools_prompt}\n"
-                    "To use a tool, respond ONLY with: ```tool_call\n{\"name\": \"TOOL_NAME\", \"arguments\": {}}\n```\n"
-                    "Example for web search: ```tool_call\n{\"name\": \"mcp_brave-search_brave_web_search\", \"arguments\": {\"query\": \"intel stock price\"}}\n```\n"
-                    "DO NOT explain. Just output the tool_call block."
-                )
-                user_message = user_message + tool_instruction
+                _dbg(f"[DEBUG] Tools prompt ({len(tools_prompt)} chars):\n{tools_prompt[:500]}")
+                user_message = user_message + "\n\n" + tools_prompt
             
             max_tokens = request.max_tokens or 512
 
@@ -941,12 +937,8 @@ def run_server_mode(model, tokenizer, processor, model_name, model_type, host="0
                     messages.append({"role": "system", "content": system_message})
                 messages.append({"role": "user", "content": user_message})
 
-                if state["tokenizer"].chat_template is not None:
-                    prompt = state["tokenizer"].apply_chat_template(
-                        messages, add_generation_prompt=True, return_dict=False,
-                    )
-                else:
-                    # Fallback: concatenate system + user
+                prompt = apply_text_chat_template(messages, request)
+                if prompt is None:
                     prompt = (system_message + "\n\n" if system_message else "") + user_message
 
                 # Model-specific generation defaults
@@ -960,7 +952,8 @@ def run_server_mode(model, tokenizer, processor, model_name, model_type, host="0
                     print(f"[Gemma] Using temp={_temp}, top_p=0.95, top_k=64")
                 else:
                     if request.temperature is not None:
-                        gen_kwargs["temp"] = request.temperature
+                        from mlx_lm.sample_utils import make_sampler
+                        gen_kwargs["sampler"] = make_sampler(request.temperature)
 
                 response_text = lm_generate(
                     state["model"], state["tokenizer"], prompt=prompt,
@@ -1007,65 +1000,51 @@ def run_server_mode(model, tokenizer, processor, model_name, model_type, host="0
                 )
                 response_text = state["tokenizer"].decode(output[0][input_ids.shape[-1]:], skip_special_tokens=True)
 
-            # Parse tool calls from response if tools were requested
-            tool_calls = []
-            resp_len = len(response_text) if response_text else 0
-            print(f"[DEBUG] Full response ({resp_len} chars):\n{response_text if response_text else 'empty'}")
-            if request.tools:
-                tool_calls = parse_tool_calls(response_text)
-                print(f"[DEBUG] Tool calls found: {len(tool_calls)}")
-                if tool_calls:
-                    print(f"[DEBUG] Parsed tool: {tool_calls[0]}")
-                if tool_calls:
-                    # Clean tool call syntax from the text
-                    response_text = clean_tool_calls_from_text(response_text)
+            # mlx_lm may return None; mlx_vlm GenerationResult.text may be None — parsers need a str.
+            if response_text is None:
+                response_text = ""
+            elif not isinstance(response_text, str):
+                response_text = getattr(response_text, "text", None) or str(response_text)
 
-            # Build OpenAI-format response
+            # Parse tools from the raw output, then strip think/tool syntax from user-visible text.
+            tool_calls = parse_tool_calls(response_text) if request.tools else []
+            visible, reasoning = split_thinking(response_text)
+            response_text = clean_tool_calls_from_text(visible)
+            _dbg(f"[DEBUG] Full response ({len(response_text or '')} chars visible, {len(reasoning)} reasoning)")
+            _dbg(f"[DEBUG] Tool calls found: {len(tool_calls)}")
+
+            msg_out = {
+                "role": "assistant",
+                "content": response_text if response_text else None,
+            }
+            if reasoning:
+                msg_out["reasoning_content"] = reasoning
+            finish = "stop"
             if tool_calls:
-                # Response with tool calls
-                return {
-                    "id": f"chatcmpl-{uuid.uuid4().hex[:8]}",
-                    "object": "chat.completion",
-                    "created": int(time.time()),
-                    "model": state["model_name"],
-                    "choices": [{
-                        "index": 0,
-                        "message": {
-                            "role": "assistant",
-                            "content": response_text if response_text else None,
-                            "tool_calls": tool_calls
-                        },
-                        "finish_reason": "tool_calls"
-                    }],
-                    "usage": {
-                        "prompt_tokens": len(user_message.split()),
-                        "completion_tokens": len(response_text.split()) if response_text else 0,
-                        "total_tokens": len(user_message.split()) + (len(response_text.split()) if response_text else 0)
-                    }
+                msg_out["tool_calls"] = tool_calls
+                finish = "tool_calls"
+            return {
+                "id": f"chatcmpl-{uuid.uuid4().hex[:8]}",
+                "object": "chat.completion",
+                "created": int(time.time()),
+                "model": state["model_name"],
+                "choices": [{
+                    "index": 0,
+                    "message": msg_out,
+                    "finish_reason": finish
+                }],
+                "usage": {
+                    "prompt_tokens": len(user_message.split()),
+                    "completion_tokens": len((response_text or "").split()),
+                    "total_tokens": len(user_message.split()) + len((response_text or "").split())
                 }
-            else:
-                # Regular response without tool calls
-                return ChatCompletionResponse(
-                    id=f"chatcmpl-{uuid.uuid4().hex[:8]}",
-                    created=int(time.time()),
-                    model=state["model_name"],
-                    choices=[
-                        ChatCompletionChoice(
-                            index=0,
-                            message=ChatMessage(role="assistant", content=response_text),
-                            finish_reason="stop"
-                        )
-                    ],
-                    usage=Usage(
-                        prompt_tokens=len(user_message.split()),
-                        completion_tokens=len(response_text.split()),
-                        total_tokens=len(user_message.split()) + len(response_text.split())
-                    )
-                )
+            }
             
         except HTTPException:
             raise  # Let HTTP errors (like 400 for image rejection) pass through
         except Exception as e:
+            # One line so uvicorn logs show the real failure (otherwise 500 is opaque).
+            print(f"[ERROR] /v1/chat/completions: {type(e).__name__}: {e}", flush=True)
             raise HTTPException(status_code=500, detail=str(e))
     
     # Get local IP for display
@@ -1154,6 +1133,7 @@ while switch_model:
         cli_model_used = True
         choice = resolve_model_choice(cli_args.model)
     else:
+        refresh_mlx_models()
         print("=" * 50)
         print("Model Selection")
         print("=" * 50)
@@ -1213,7 +1193,13 @@ while switch_model:
     # ============================================================================
     if use_vl_model and MLX_VLM_AVAILABLE:
         print(f"\nLoading {selected_desc} (MLX Vision)...")
-        model, processor = vlm_load(selected_path)
+        try:
+            model, processor = vlm_load(selected_path)
+        except Exception as e:
+            print(f"mlx-vlm failed to load this VLM: {type(e).__name__}: {e}")
+            print("Qwen3.8 VLMs need mlx-vlm>=0.6.8 (this folder was converted with 0.6.8).")
+            print("Fix:  pip install -U 'mlx-vlm>=0.6.8'")
+            raise
         tokenizer = None  # VLM uses processor
         
         # If server mode, start server and skip interactive loop

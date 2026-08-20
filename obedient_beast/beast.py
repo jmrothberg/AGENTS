@@ -57,9 +57,9 @@ import base64
 import subprocess
 from pathlib import Path
 from datetime import datetime
-from dotenv import load_dotenv
+from capabilities import load_beast_env
 
-load_dotenv()
+load_beast_env()
 
 from llm import get_llm, ToolCall
 
@@ -117,10 +117,11 @@ def execute_mcp_tool(name: str, args: dict) -> str:
 
 def get_all_tools() -> list[dict]:
     """
-    Get all available tools: 30 built-in + any MCP tools.
-    This is what gets sent to the LLM so it knows what it can call.
+    Get tools for the LLM: built-in tools in the active groups + any MCP tools.
+    All 30 handlers stay in execute_tool; groups only change what is offered.
     """
-    return TOOLS + get_mcp_tools()
+    from capabilities import filter_tools_by_group
+    return filter_tools_by_group(TOOLS) + get_mcp_tools()
 
 
 # ---------------------------------------------------------------------------
@@ -186,6 +187,18 @@ def get_and_clear_pending_image() -> str:
     return path
 
 
+def _history_assistant_text(response) -> str:
+    """Visible reply plus optional <think> so Qwen preserve_thinking sees prior reasoning."""
+    text = response.text or ""
+    reasoning = getattr(response, "reasoning", "") or ""
+    if not reasoning:
+        return text
+    from llm import QWEN_PRESERVE_THINKING
+    if QWEN_PRESERVE_THINKING:
+        return f"<think>\n{reasoning}\n</think>\n{text}".strip()
+    return text
+
+
 # ---------------------------------------------------------------------------
 # System Prompt — loaded from SOUL.md + AGENTS.md
 # ---------------------------------------------------------------------------
@@ -194,12 +207,11 @@ def get_and_clear_pending_image() -> str:
 # Both are optional — if missing, a minimal default prompt is used.
 
 def _render_tools_manifest() -> str:
-    """Auto-generate a TOOLS.md-style section for the system prompt.
+    """Optional TOOLS.md-style dump. Not injected into SYSTEM_PROMPT — the API tools array is the catalog.
 
     OpenClaw injects a TOOLS.md file that lists every capability alongside
-    SOUL.md and AGENTS.md. We do the same dynamically: the manifest always
-    reflects the *current* TOOLS list, so newly-added tools become visible to
-    the LLM immediately without editing a markdown file by hand.
+    SOUL.md and AGENTS.md. We keep this helper if you want to write TOOLS.md
+    by hand; dumping it into every turn doubled tokens for a local 27B.
     """
     lines = [
         "## Tools Manifest",
@@ -234,8 +246,9 @@ def load_system_prompt() -> str:
       rules should I follow?
     - **Skills index** — what high-level recipes can I pull in on demand via
       `use_skill`?
-    - **Tools manifest** — what low-level verbs do I have right now?
     - **Base prompt** — a last-resort fallback if nothing else is configured.
+    The OpenAI/API tools array is the catalog of verbs — we do not dump a second
+    tools manifest into the system prompt (that doubled tokens for a 27B).
     """
     soul_file = WORKSPACE / "SOUL.md"
     agents_file = WORKSPACE / "AGENTS.md"
@@ -257,8 +270,6 @@ Be concise and helpful. When executing commands, explain what you're doing."""
             prompt += skills_block + "\n"
     except Exception as exc:  # pragma: no cover — never block startup on skills
         print(f"[Skills] Could not load skills index: {exc}", file=sys.stderr)
-    # Tools manifest: auto-generated from the TOOLS list below.
-    prompt += _render_tools_manifest() + "\n"
     prompt += base_prompt
     return prompt
 
@@ -463,6 +474,18 @@ def _extract_atomic_facts(user_input: str, response_text: str) -> list[str]:
     return facts
 
 
+def _looks_like_cot(text: str) -> bool:
+    """True if this looks like chain-of-thought / prompt-echo, not a durable fact."""
+    low = (text or "").lower()
+    return any(m in low for m in (
+        "user is asking",
+        "looking at the instructions",
+        "<think>",
+        "let me think",
+        "the user wants me to",
+    ))
+
+
 def _try_memory_save(session_id: str, user_input: str, response_text: str):
     """
     Auto-save key facts to memory at end of a conversation turn.
@@ -470,26 +493,18 @@ def _try_memory_save(session_id: str, user_input: str, response_text: str):
     Local memory is the durable store; MCP graph adds richer entity/relationship
     recall during the current session but resets on restart.
 
-    Strategy: extract atomic facts from the response when possible; otherwise
-    fall back to a compact conversation snippet. Both paths go through
-    _save_local_memory_fact which dedupes + categorizes.
+    Only atomic facts are stored. Chain-of-thought and reply dumps are skipped.
     """
-    # Always save to local memory fallback (works offline, no MCP needed)
-    from capabilities import MEMORY_DETAIL
+    if _looks_like_cot(response_text):
+        return
 
-    # Prefer atomic facts pulled from the response text
     atomic = _extract_atomic_facts(user_input, response_text)
-    if atomic:
-        for f in atomic:
-            _save_local_memory_fact(f)
-        fact = atomic[0]  # Use first atomic fact for the MCP mirror below
-    else:
-        # Fallback: compact conversation snippet (dedup handles repeats)
-        if MEMORY_DETAIL == "minimal":
-            fact = f"user asked about '{user_input[:80]}'"
-        else:
-            fact = f"user asked '{user_input[:120]}'; beast replied '{response_text[:180]}'"
-        _save_local_memory_fact(fact)
+    if not atomic:
+        return
+
+    for f in atomic:
+        _save_local_memory_fact(f)
+    fact = atomic[0]
 
     # Also save to MCP memory if available (richer knowledge graph)
     if not MCP_ENABLED or _mcp_client is None:
@@ -783,8 +798,8 @@ TOOLS = [
     },
 ]
 
-# Now that TOOLS is defined, compose the full system prompt (SOUL + AGENTS +
-# skills index + auto-generated tools manifest + fallback base prompt).
+# Now that TOOLS is defined, compose the system prompt (SOUL + AGENTS + skills).
+# Tool schemas go to the model via the API tools array, not this prompt.
 SYSTEM_PROMPT = load_system_prompt()
 
 
@@ -1255,7 +1270,17 @@ def execute_tool(name: str, args: dict) -> str:
             html = args.get("html", "").strip()
             if not html:
                 return "Error: run_html requires an 'html' parameter"
-            filename = args.get("filename", "index.html")
+            # Derive filename from <title> if not explicitly provided
+            filename = args.get("filename", "").strip()
+            if not filename:
+                import re as _re
+                _title_m = _re.search(r"<title>(.+?)</title>", html, _re.IGNORECASE)
+                if _title_m:
+                    # slugify: lowercase, spaces→hyphens, strip non-alnum
+                    _slug = _re.sub(r"[^a-z0-9]+", "-", _title_m.group(1).lower()).strip("-")
+                    filename = f"{_slug}.html" if _slug else "index.html"
+                else:
+                    filename = "index.html"
             open_browser = str(args.get("open_browser", "true")).lower() != "false"
             ts = datetime.now().strftime("%Y%m%d_%H%M%S")
             sandbox_dir = WORKSPACE / "Generated Code" / f"html_{ts}"
@@ -1569,10 +1594,36 @@ def run(user_input: str, session_id: str = "default", llm=None, image_path: str 
                 pass
         return "🧹 All cleared — chat history, task queue, and memory."
 
-    # --- /tools: list all available tools (built-in + MCP) ---
-    if cmd == "/tools":
+    # --- /tools: list active tools, or set groups: /tools all  /tools core,browser ---
+    if cmd == "/tools" or cmd.startswith("/tools "):
+        from capabilities import (
+            get_active_tool_groups, set_tool_groups, TOOL_GROUPS,
+        )
+        arg = cmd[len("/tools"):].strip()
+        known = list(TOOL_GROUPS.keys())
+        if arg:
+            if arg.lower() != "all":
+                wanted = [g.strip().lower() for g in arg.split(",") if g.strip()]
+                bad = [g for g in wanted if g not in TOOL_GROUPS]
+                if bad:
+                    return (
+                        f"Unknown tool group(s): {', '.join(bad)}. "
+                        f"Known: {', '.join(known)} or `all`."
+                    )
+                groups = set_tool_groups(",".join(wanted))
+            else:
+                groups = set_tool_groups("all")
+            return (
+                f"Tool groups set to: {', '.join(groups)}\n"
+                f"Use `/tools` to list the active tools."
+            )
+        groups = get_active_tool_groups()
         tools = get_all_tools()
-        tool_list = ["Available tools:"]
+        tool_list = [
+            f"Active groups: {', '.join(groups)}",
+            f"Change with `/tools all` or `/tools {','.join(known)}`",
+            "Available tools:",
+        ]
         for t in tools:
             prefix = "[MCP] " if t["name"].startswith("mcp_") else ""
             tool_list.append(f"  {prefix}{t['name']}: {t['description'][:60]}...")
@@ -1616,7 +1667,7 @@ Currently: **{TIER_LABEL}** — depth {DEPTH} (chains up to {DEPTH} steps per re
 `/heartbeat on|off` — toggle background task processing
 `/boot` — run workspace/BOOT.md startup routine on demand
 `/clear` — clear chat history (`/clear tasks`, `/clear memory`, `/clear all`)
-`/tools` — list all my abilities
+`/tools` — list abilities (`/tools all` or `/tools core,browser,desktop`)
 `/sandbox` — list recent sandbox runs (Python scripts, HTML pages)
 `/skills` — installable MCP plug-in skills
 `/more` — detailed guide with examples
@@ -1787,7 +1838,7 @@ I'm an AI assistant that lives on your computer. You talk to me (here in the ter
   `/done 3` — mark task #3 complete
   `/drop 3` — delete task #3
   `/clear` — clear history (`/clear tasks`, `/clear memory`, `/clear all`)
-  `/tools` — list all my abilities
+  `/tools` — list abilities (`/tools all` or `/tools core,browser,desktop`)
   `/sandbox` — list recent sandbox runs
   `/skills` — list installable MCP skills
   `/claude` — switch to Cloud (Claude)
@@ -2156,11 +2207,11 @@ I'm an AI assistant that lives on your computer. You talk to me (here in the ter
     # ---------------------------------------------------------------------------
     # Depth — how many tool-call steps the model can chain per request.
     # Controlled by /depth command or capabilities.py defaults.
-    # Cloud default: 10, Local default: 5. User can change at runtime.
+    # Cloud default: 10, Local default: 8. User can change at runtime.
     # ---------------------------------------------------------------------------
     from capabilities import DEPTH
 
-    all_tools = get_all_tools()  # Built-in (18) + MCP tools
+    all_tools = get_all_tools()  # Built-in (filtered by group) + MCP tools
 
     # --- Context cap: prevent blowing the LLM context window ---
     # Long sessions with many tool calls grow unbounded. This trims old messages
@@ -2272,10 +2323,11 @@ I'm an AI assistant that lives on your computer. You talk to me (here in the ter
             # Both Claude and OpenAI expect a single assistant message containing
             # all tool calls, not separate messages per call. The old code created
             # one assistant message per tool call, which produced malformed history.
+            hist_text = _history_assistant_text(response)
             if llm.backend == "claude":
                 assistant_msg = {"role": "assistant", "content": []}
-                if response.text:
-                    assistant_msg["content"].append({"type": "text", "text": response.text})
+                if hist_text:
+                    assistant_msg["content"].append({"type": "text", "text": hist_text})
                 for tc in response.tool_calls:
                     assistant_msg["content"].append(
                         {"type": "tool_use", "id": tc.id, "name": tc.name, "input": tc.args}
@@ -2284,7 +2336,7 @@ I'm an AI assistant that lives on your computer. You talk to me (here in the ter
                 # OpenAI / local format: all tool_calls in one array
                 assistant_msg = {
                     "role": "assistant",
-                    "content": response.text or None,
+                    "content": hist_text or None,
                     "tool_calls": [
                         {
                             "id": tc.id,
@@ -2304,11 +2356,9 @@ I'm an AI assistant that lives on your computer. You talk to me (here in the ter
                 # Log to both stderr (CLI) and stdout (pm2 logs)
                 args_preview = str(tool_call.args)[:200]
                 print(f"  🔧 [{tool_call.name}] {args_preview}", file=sys.stderr)
-                print(f"  🔧 [{tool_call.name}] {args_preview}")
                 result = execute_tool(tool_call.name, tool_call.args)
                 result_preview = str(result)[:200].replace('\n', ' ')
                 print(f"  ✅ [{tool_call.name}] → {result_preview}", file=sys.stderr)
-                print(f"  ✅ [{tool_call.name}] → {result_preview}")
                 tool_results.append((tool_call, result))
 
             # --- Loop detection: bail if the agent is spinning ---
@@ -2385,7 +2435,7 @@ I'm an AI assistant that lives on your computer. You talk to me (here in the ter
 
         else:
             # No tool calls — LLM returned a text response, we're done
-            final_msg = {"role": "assistant", "content": response.text}
+            final_msg = {"role": "assistant", "content": _history_assistant_text(response)}
             history.append(final_msg)
             save_message(session_id, final_msg)
             # Auto-save key facts to memory (both MCP and local JSON)
@@ -2505,15 +2555,6 @@ def cli():
                 session_id = f"cli_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
                 pending_image = None
                 print("(Session reset)\n")
-                continue
-
-            if user_input.lower() == "/tools":
-                tools = get_all_tools()
-                print("\nAvailable tools:")
-                for t in tools:
-                    prefix = "[MCP] " if t["name"].startswith("mcp_") else ""
-                    print(f"  {prefix}{t['name']}: {t['description'][:60]}...")
-                print()
                 continue
 
             # /image [path] — attach an image to the next message

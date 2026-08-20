@@ -36,9 +36,9 @@ Usage:
 import os
 import json
 from flask import Flask, request, jsonify
-from dotenv import load_dotenv
+from capabilities import load_beast_env
 
-load_dotenv()
+load_beast_env()
 
 from beast import run, get_and_clear_pending_image
 from llm import get_llm

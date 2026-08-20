@@ -43,9 +43,9 @@ import time
 import signal
 from pathlib import Path
 from datetime import datetime
-from dotenv import load_dotenv
+from capabilities import load_beast_env
 
-load_dotenv()
+load_beast_env()
 
 # ---------------------------------------------------------------------------
 # Import Beast and capabilities
@@ -210,9 +210,7 @@ def process_task(task: dict, llm) -> str:
         prompt = (
             f"[AUTONOMOUS TASK #{task_id}] {description}\n"
             f"This is an autonomous task from your task queue. "
-            f"Complete it and report the result. "
-            f"When done, use add_task with task_id={task_id} and status=done to mark it complete. "
-            f"If it fails, use add_task with task_id={task_id} and status=failed."
+            f"Complete it and report the result."
         )
 
     session_id = f"heartbeat_task_{task_id}"
@@ -234,6 +232,15 @@ def process_task(task: dict, llm) -> str:
                 else f"every {task.get('repeat_seconds')}s"
             )
             print(f"[Heartbeat] Recurring task #{task_id} rescheduled ({recurrence})")
+        else:
+            # One-shots: mark done in code. Do not rely on the model calling add_task.
+            data = load_tasks()
+            for t in data["tasks"]:
+                if t.get("id") == task_id and t.get("status") == "pending":
+                    t["status"] = "done"
+                    t["updated_at"] = datetime.now().isoformat()
+            save_tasks(data)
+            print(f"[Heartbeat] Task #{task_id} marked done")
         _write_notification(task, response)
         return response
     except Exception as e:

@@ -380,67 +380,23 @@ def clear_model_memory():
 # ============================================================================
 
 def format_tools_for_prompt(tools):
-    """
-    Format tools for local LLMs (aligned with lfm_thinking.py server).
-    Priority tools first; run_python / run_html emphasized.
-    """
+    """Short format reminder. The OpenAI tools array is the catalog."""
     if not tools:
         return ""
-
-    priority_names = [
-        "generate_art", "run_python", "run_html",
-        "shell", "read_file", "write_file", "edit_file", "list_dir",
-        "screenshot", "add_task", "recall_memory", "fetch_url",
-        "browser_goto", "browser_read",
-        "spawn_agent", "list_skills", "use_skill",
-    ]
-
-    priority_lines = []
-    other_names = []
-    seen = set()
-
-    for pname in priority_names:
-        for tool in tools:
-            func = tool.get("function", tool)
-            name = func.get("name", "unknown")
-            if name == pname and name not in seen:
-                seen.add(name)
-                desc = func.get("description", "")[:80]
-                params = func.get("parameters", {}).get("properties", {})
-                param_names = ", ".join(params.keys())
-                priority_lines.append(f"- {name}({param_names}): {desc}")
-
-    for tool in tools:
-        func = tool.get("function", tool)
-        name = func.get("name", "unknown")
-        if name not in seen:
-            other_names.append(name)
-            seen.add(name)
-
-    lines = [
-        "## Available Tools",
-        "Call a tool by outputting JSON in this format:",
-        '```tool_call',
+    return "\n".join([
+        "## Tools",
+        "Call tools with JSON:",
+        "```tool_call",
         '{"name": "tool_name", "arguments": {"param": "value"}}',
-        '```',
+        "```",
+        "Or Qwen native: <tool_call>{\"name\": \"...\", \"arguments\": {...}}</tool_call>",
         "",
-        "**IMPORTANT: For Python code use run_python. For HTML pages use run_html. Do NOT use shell or write_file for code.**",
-        "",
-        "**Primary tools:**",
-    ]
-    lines.extend(priority_lines)
-    if other_names:
-        lines.append(f"\n**Other tools ({len(other_names)}):** " + ", ".join(other_names[:20]))
-        if len(other_names) > 20:
-            lines.append(f"  ...and {len(other_names) - 20} more")
-    lines.append("\nRULES:")
-    lines.append("- You MUST call a tool when the user asks you to do something. Never just describe what you would do.")
-    lines.append("- For drawing/art/images: ALWAYS use generate_art. Put a detailed description in the 'prompt' argument.")
-    lines.append("- For Python code: ALWAYS use run_python. Put the code in the 'code' argument. NEVER output ```python blocks — the user cannot run those.")
-    lines.append("- For HTML/JS: ALWAYS use run_html. Put the HTML in the 'html' argument. NEVER use write_file.")
-    lines.append("- Output ONLY the ```tool_call block. No explanation before or after.")
-
-    return "\n".join(lines)
+        "RULES:",
+        "- Answer in text unless you need to act.",
+        "- You may call several independent tools in one turn.",
+        "- For Python use run_python. For HTML use run_html. For images use generate_art.",
+        "- Never retry a tool call that already succeeded. When the task is done, answer in text.",
+    ])
 
 
 def parse_tool_calls(text):
@@ -567,7 +523,8 @@ def parse_tool_calls(text):
             if data and "name" in data:
                 try_add(data)
 
-    return tool_calls[:1]
+    # Return all parsed calls — Beast executes them sequentially and has loop detection.
+    return tool_calls
 
 
 def clean_tool_calls_from_text(text):

@@ -18,8 +18,7 @@ If unsure, do the task now. Only queue it if the user explicitly says "later" or
 
 When running autonomously (heartbeat/task queue), follow these rules:
 - Process ONE task at a time from the task queue
-- After completing a task, mark it as "done" using the add_task tool with status "done"
-- If a task fails, mark it as "failed" and move on
+- Complete the work and report the result (the heartbeat marks one-shots done)
 - Do NOT start tasks that require user confirmation unless marked "approved"
 
 ## Step-by-Step Reasoning

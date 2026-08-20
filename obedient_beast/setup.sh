@@ -119,8 +119,10 @@ setup_python() {
     echo "Upgrading pip..."
     pip install --upgrade pip > /dev/null 2>&1
     
-    # Install requirements
-    echo "Installing Python dependencies..."
+    # Install server deps (MLX/FastAPI) then Beast deps
+    echo "Installing Python dependencies (local LLM server)..."
+    pip install -r "$PARENT_DIR/requirements.txt"
+    echo "Installing Python dependencies (Beast agent)..."
     pip install -r "$SCRIPT_DIR/requirements.txt"
     
     echo -e "${GREEN}✓ Python dependencies installed${NC}"
@@ -165,29 +167,37 @@ setup_env() {
         echo "Creating .env from template..."
         cat > "$ENV_FILE" << 'EOF'
 # =============================================================================
-# Obedient Beast - Configuration
+# Obedient Beast - Configuration (repo-root .env is canonical)
 # =============================================================================
-# Edit this file with your settings
+# LLM Backend: "lfm" (local model), "openai", or "claude"
+# "lfm" is a legacy name — it means any model on the local server (Qwen, etc.)
+LLM_BACKEND=lfm
 
-# LLM Backend: "lfm" (local), "openai", or "claude"
-LLM_BACKEND=claude
+# Local model server (no /v1 suffix — the client appends /v1/chat/completions)
+LFM_URL=http://localhost:8000
+# LFM_URL_REMOTE=http://192.168.1.100:8000
+LFM_MODEL=Qwen3.8-27B-mxfp8
 
-# Your LFM Server (when LLM_BACKEND=lfm)
-# LFM_URL=http://192.168.1.100:8000
+# Qwen3.8 thinking knobs (ignored by Claude/OpenAI)
+QWEN_REASONING_EFFORT=medium
+QWEN_ENABLE_THINKING=true
+QWEN_PRESERVE_THINKING=true
 
-# API Keys (get from provider websites)
-ANTHROPIC_API_KEY=your-anthropic-key-here
+# Tool groups for local 27B: core,browser,art,desktop,mcp_mgmt,spawn or "all"
+# BEAST_TOOL_GROUPS=core,browser,art
+
+# Cloud keys (only needed if you switch with /claude or /openai)
+# ANTHROPIC_API_KEY=your-anthropic-key-here
 # OPENAI_API_KEY=your-openai-key-here
 
-# WhatsApp Security - Only these numbers can interact with Beast
-# Format: comma-separated with country code
+# WhatsApp — comma-separated numbers with country code
 ALLOWED_NUMBERS=+12025551234
 
-# MCP (Model Context Protocol) - Optional advanced tools
-# Set to "true" to enable external MCP servers (filesystem, git, memory)
+# MCP tool servers (filesystem, brave-search, …)
 MCP_ENABLED=false
+# BRAVE_API_KEY=
 EOF
-        echo -e "${YELLOW}⚠ Created .env file - please edit it with your API keys!${NC}"
+        echo -e "${YELLOW}⚠ Created .env at repo root — local backend is the default.${NC}"
         echo "   Location: $ENV_FILE"
     fi
     
@@ -261,22 +271,16 @@ except ImportError as e:
 print_next_steps() {
     echo "Next steps:"
     echo ""
-    echo "  1. Edit your configuration:"
-    echo -e "     ${YELLOW}nano $PARENT_DIR/.env${NC}"
-    echo "     Add your API keys (ANTHROPIC_API_KEY or OPENAI_API_KEY)"
+    echo "  1. (Optional) Edit $PARENT_DIR/.env — default is local Qwen via LLM_BACKEND=lfm"
     echo ""
-    echo "  2. Test in CLI mode:"
-    echo -e "     ${YELLOW}cd $SCRIPT_DIR && source ../.venv/bin/activate && python3 beast.py${NC}"
+    echo "  2. Chat only (local model + CLI, no WhatsApp):"
+    echo -e "     ${YELLOW}cd $SCRIPT_DIR && ./start.sh cli${NC}"
     echo ""
-    echo "  3. Start with WhatsApp:"
+    echo "  3. Full stack (WhatsApp + heartbeat + CLI):"
     echo -e "     ${YELLOW}cd $SCRIPT_DIR && ./start.sh${NC}"
-    echo "     Then scan the QR code with WhatsApp"
+    echo "     Scan the QR code in the WhatsApp window"
     echo ""
-    echo "  4. (Optional) Enable computer control:"
-    echo -e "     ${YELLOW}pip install pyautogui mss pillow${NC}"
-    echo ""
-    echo "  5. (Optional) Enable MCP tools:"
-    echo "     Set MCP_ENABLED=true in .env"
+    echo "  4. Switch brains later: /claude  /openai  /lfm  (or LLM_BACKEND in .env)"
     echo ""
 }
 

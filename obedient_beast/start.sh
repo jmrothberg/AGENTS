@@ -3,19 +3,24 @@
 # Obedient Beast - Startup Script
 # =============================================================================
 # Usage:
-#   ./start.sh              - Open 5 Terminal windows (lfm, server, whatsapp,
-#                             heartbeat, CLI). Skips any already running.
+#   ./start.sh              - Full stack: 5 Terminal windows (local model, server,
+#                             whatsapp, heartbeat, CLI). Skips any already running.
+#   ./start.sh phone        - This Mac + WhatsApp: 3 windows (Qwen, server, bridge).
+#                             Forces LFM_URL=localhost and MCP_ENABLED=false.
+#   ./start.sh cli          - No WhatsApp: local model server + CLI only
 #   ./start.sh pm2          - Start server/whatsapp/heartbeat via pm2 (background,
 #                             auto-restart) + terminal windows for lfm and CLI.
 #                             Skips pm2 services that are already online.
 #   ./start.sh server       - Start only the Python server (terminal window)
 #   ./start.sh whatsapp     - Start only the WhatsApp bridge (terminal window)
 #   ./start.sh heartbeat    - Start only the heartbeat (terminal window)
-#   ./start.sh lfm          - Open terminal window for lfm_thinking.py (interactive)
-#   ./start.sh cli          - Start only the CLI (direct terminal chat)
+#   ./start.sh lfm          - Open terminal window for the local model server
 #   ./start.sh stop         - Stop all Beast processes
 #   ./start.sh status       - Check if processes are running
 #   ./start.sh clear-history - Clear all conversation history
+#
+# LFM_MODEL (env or repo-root .env) selects the local weights. Default:
+# Qwen3.8-27B-mxfp8. If that folder is missing, the interactive picker opens.
 # =============================================================================
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -40,6 +45,39 @@ NC='\033[0m'
 echo "============================================================"
 echo "🐺 Obedient Beast"
 echo "============================================================"
+
+# ---------------------------------------------------------------------------
+# Local model name: env LFM_MODEL, else repo-root .env, else Qwen3.8-27B-mxfp8.
+# If that folder is not under MLX_Models, fall back to the interactive picker.
+# ---------------------------------------------------------------------------
+if [ -z "${LFM_MODEL:-}" ] && [ -f "$PARENT_DIR/.env" ]; then
+    LFM_MODEL=$(grep -E '^LFM_MODEL=' "$PARENT_DIR/.env" 2>/dev/null | tail -1 | cut -d= -f2- | tr -d ' "'"'"'')
+fi
+LFM_MODEL="${LFM_MODEL:-Qwen3.8-27B-mxfp8}"
+MLX_MODELS_DIR="/Users/jonathanrothberg/MLX_Models"
+
+mlx_model_exists() {
+    [ -d "$MLX_MODELS_DIR" ] || return 1
+    local needle
+    needle=$(echo "$LFM_MODEL" | tr '[:upper:]' '[:lower:]')
+    local d bn
+    for d in "$MLX_MODELS_DIR"/*; do
+        [ -d "$d" ] || continue
+        bn=$(basename "$d" | tr '[:upper:]' '[:lower:]')
+        case "$bn" in
+            *"$needle"*) return 0 ;;
+        esac
+    done
+    return 1
+}
+
+# Command run in the LFM terminal (cwd = PARENT_DIR)
+if mlx_model_exists; then
+    LFM_CMD="python3 lfm_thinking.py --model $LFM_MODEL --server"
+else
+    echo -e "${YELLOW}Model '$LFM_MODEL' not found in $MLX_MODELS_DIR — using interactive picker${NC}"
+    LFM_CMD="python3 lfm_thinking.py"
+fi
 
 # ---------------------------------------------------------------------------
 # Open a new terminal window and run a command (cross-platform)
@@ -90,7 +128,7 @@ start_all() {
     if is_running "python.*lfm_thinking.py"; then
         echo -e "  ${YELLOW}⚠ LFM Thinking already running — skipping${NC}"
     else
-        open_terminal "🧠 LFM Thinking" "cd $PARENT_DIR && $ACTIVATE && python3 lfm_thinking.py"
+        open_terminal "🧠 LFM Thinking" "cd $PARENT_DIR && $ACTIVATE && $LFM_CMD"
         sleep 1
     fi
 
@@ -194,7 +232,7 @@ start_pm2() {
     if is_running "python.*lfm_thinking.py"; then
         echo -e "  ${YELLOW}⚠ LFM Thinking already running — skipping${NC}"
     else
-        open_terminal "🧠 LFM Thinking" "cd $PARENT_DIR && $ACTIVATE && python3 lfm_thinking.py"
+        open_terminal "🧠 LFM Thinking" "cd $PARENT_DIR && $ACTIVATE && $LFM_CMD"
         sleep 1
     fi
 
@@ -233,7 +271,7 @@ start_lfm() {
     if is_running "python.*lfm_thinking.py"; then
         echo -e "${YELLOW}⚠ LFM Thinking already running${NC}"
     else
-        open_terminal "🧠 LFM Thinking" "cd $PARENT_DIR && $ACTIVATE && python3 lfm_thinking.py"
+        open_terminal "🧠 LFM Thinking" "cd $PARENT_DIR && $ACTIVATE && $LFM_CMD"
     fi
 }
 
@@ -270,11 +308,41 @@ start_whatsapp() {
 }
 
 start_cli() {
+    # No-WhatsApp path: local model server + CLI
+    start_lfm
     if is_running "python.*beast.py"; then
         echo -e "${YELLOW}⚠ Beast CLI already running${NC}"
     else
         open_terminal "🐺 Beast CLI" "$ACTIVATE && cd $SCRIPT_DIR && python3 beast.py"
     fi
+}
+
+# This Mac's Qwen + WhatsApp only (no CLI, no heartbeat, no remote LFM_URL, no MCP hang).
+start_phone() {
+    echo -e "${GREEN}Opening 3 Terminal windows (this Mac → WhatsApp)...${NC}"
+
+    start_lfm
+    sleep 1
+
+    if is_running "python.*server.py"; then
+        echo -e "  ${YELLOW}⚠ Server already running — skipping${NC}"
+    else
+        # Override .env LFM_URL (may point at another machine) and skip MCP.
+        open_terminal "🖥  Beast Server" "$ACTIVATE && cd $SCRIPT_DIR && MCP_ENABLED=false LFM_URL=http://localhost:8000 python3 server.py"
+        sleep 1
+    fi
+
+    start_whatsapp
+
+    echo ""
+    echo -e "${GREEN}Leave these 3 windows open:${NC}"
+    echo "  1. LFM Thinking   — the brain. Wait until it says the API is ready (a few minutes)."
+    echo "  2. Beast Server   — mailbox. WhatsApp messages land here, then go to the brain."
+    echo "  3. WhatsApp Bridge — phone link. Scan the QR if one appears; otherwise it reuses the saved login."
+    echo ""
+    echo "  Do not text until window 1 has finished loading."
+    echo "  Stop: ./start.sh stop"
+    echo ""
 }
 
 # ---------------------------------------------------------------------------
@@ -338,6 +406,7 @@ case "${1:-all}" in
     heartbeat)  start_heartbeat ;;
     lfm)        start_lfm ;;
     cli)        start_cli ;;
+    phone)      start_phone ;;
     stop)       stop_all ;;
     status)     check_status ;;
     clear-history)
@@ -347,7 +416,7 @@ case "${1:-all}" in
         ;;
     all|"")     start_all ;;
     *)
-        echo "Usage: $0 {pm2|server|whatsapp|heartbeat|lfm|cli|stop|status|clear-history}"
+        echo "Usage: $0 {phone|pm2|server|whatsapp|heartbeat|lfm|cli|stop|status|clear-history}"
         exit 1
         ;;
 esac

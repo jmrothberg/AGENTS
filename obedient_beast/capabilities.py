@@ -13,7 +13,7 @@ Cloud vs Local:
     +---------------------+-----------+-----------+
     | Setting             | Cloud     | Local     |
     +---------------------+-----------+-----------+
-    | Default depth       | 10        | 5         |
+    | Default depth       | 10        | 8         |
     | Sequential thinking | On        | Off       |
     | Heartbeat interval  | 5 min     | 10 min    |
     | Tasks per cycle     | 3         | 2         |
@@ -31,9 +31,24 @@ Inspired by Clawdbot/OpenClaw's tiered agent architecture.
 """
 
 import os
+from pathlib import Path
 from dotenv import load_dotenv
 
-load_dotenv()
+
+def load_beast_env():
+    """Load .env from repo root, then obedient_beast/, then cwd.
+
+    First file wins for each key (override=False). Canonical location is the
+    repo-root `.env` next to lfm_thinking.py.
+    """
+    beast_dir = Path(__file__).resolve().parent
+    repo_root = beast_dir.parent
+    load_dotenv(repo_root / ".env")
+    load_dotenv(beast_dir / ".env")
+    load_dotenv()
+
+
+load_beast_env()
 
 # ---------------------------------------------------------------------------
 # Read the backend from the same env var as llm.py
@@ -51,7 +66,7 @@ def is_cloud() -> bool:
 # ---------------------------------------------------------------------------
 # "Depth" = how many tool-call steps the model can chain before responding.
 # Cloud models are faster and smarter, so they get more steps by default.
-# Local models default to 5 but the user can change it with /depth.
+# Local (Qwen3.8-class) defaults to 8; user can change it with /depth.
 
 if is_cloud():
     DEPTH = 10                              # aka MAX_TOOL_TURNS
@@ -61,7 +76,7 @@ if is_cloud():
     MEMORY_DETAIL = "full"
     TIER_LABEL = f"Cloud ({_BACKEND})"
 else:
-    DEPTH = 5
+    DEPTH = 8
     SEQUENTIAL_THINKING_ENABLED = False
     HEARTBEAT_INTERVAL_SEC = 600            # 10 min
     HEARTBEAT_TASKS_PER_CYCLE = 2
@@ -77,6 +92,63 @@ SINGLE_TOOL_MODE = False
 
 # MCP tier filtering — all tiers always loaded regardless of backend.
 MCP_ALLOWED_TIERS = ["essential", "extended", "cloud"]
+
+# ---------------------------------------------------------------------------
+# Tool groups — shrink the tool list sent to a local 27B; all handlers stay.
+# Env BEAST_TOOL_GROUPS=core,browser,art (or "all"). /tools also sets this
+# for the process lifetime (same pattern as /lfm).
+# ---------------------------------------------------------------------------
+TOOL_GROUPS = {
+    "core": [
+        "shell", "read_file", "write_file", "list_dir", "edit_file",
+        "fetch_url", "recall_memory", "add_task",
+        "run_python", "run_html", "list_skills", "use_skill",
+    ],
+    "browser": [
+        "browser_goto", "browser_read", "browser_click", "browser_type",
+        "browser_screenshot", "browser_close",
+    ],
+    "desktop": [
+        "screenshot", "mouse_click", "mouse_move", "keyboard_type",
+        "keyboard_hotkey", "get_screen_size", "get_mouse_position",
+    ],
+    "art": ["generate_art"],
+    "mcp_mgmt": ["install_mcp_server", "list_mcp_servers", "enable_mcp_server"],
+    "spawn": ["spawn_agent"],
+}
+
+
+def get_active_tool_groups() -> list:
+    """Resolve active tool groups from BEAST_TOOL_GROUPS (env or /tools)."""
+    raw = os.getenv("BEAST_TOOL_GROUPS", "").strip()
+    if raw.lower() == "all":
+        return list(TOOL_GROUPS.keys())
+    if raw:
+        return [g.strip().lower() for g in raw.split(",") if g.strip()]
+    if is_cloud():
+        return list(TOOL_GROUPS.keys())
+    return ["core", "browser", "art"]
+
+
+def set_tool_groups(spec: str) -> list:
+    """Set BEAST_TOOL_GROUPS for this process. Returns the resolved group list."""
+    spec = (spec or "").strip()
+    os.environ["BEAST_TOOL_GROUPS"] = spec
+    return get_active_tool_groups()
+
+
+def filter_tools_by_group(tools: list) -> list:
+    """Keep built-in tools in active groups. MCP tools (mcp_*) always pass."""
+    groups = get_active_tool_groups()
+    if set(groups) >= set(TOOL_GROUPS.keys()):
+        return tools
+    allowed = set()
+    for g in groups:
+        allowed.update(TOOL_GROUPS.get(g, []))
+    return [
+        t for t in tools
+        if t.get("name", "").startswith("mcp_") or t.get("name") in allowed
+    ]
 
 
 def set_depth(n: int):
@@ -98,3 +170,4 @@ if __name__ == "__main__":
     print(f"Tasks per cycle:      {HEARTBEAT_TASKS_PER_CYCLE}")
     print(f"Memory detail:        {MEMORY_DETAIL}")
     print(f"MCP servers:          {MCP_ALLOWED_TIERS}")
+    print(f"Tool groups:          {get_active_tool_groups()}")

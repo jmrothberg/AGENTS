@@ -77,11 +77,11 @@
     "brave-search": {
       "enabled": true,
       "command": "npx -y @modelcontextprotocol/server-brave-search",
-      "description": "Web search capabilities using Brave Search API",
+      "description": "Web search via Brave Search API. Set BRAVE_API_KEY in the repo-root .env (not in this file).",
       "local": false,
       "tier": "cloud",
       "env": {
-        "BRAVE_API_KEY": "BSA_RItMbh9nmgrLmO7N2aHRnlwA7GS"
+        "BRAVE_API_KEY": ""
       }
     },
     "github": {

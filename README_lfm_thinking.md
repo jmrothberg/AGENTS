@@ -1,77 +1,15 @@
-# lfm_thinking.py — Local Model Inference Server
+# lfm_thinking.py — Local Model Server
 
-Written by Jonathan M Rothberg
+**lfm = local model** (legacy name). This is the macOS/MLX OpenAI-compatible server Beast uses when `LLM_BACKEND=lfm`.
 
-Dynamically scans model directories and serves any compatible model locally.
-- **macOS**: Uses MLX (`mlx-lm` for text, `mlx-vlm` for vision)
-- **Linux**: Falls back to `transformers` / PyTorch
-
-Model type (text vs vision) is auto-detected from `config.json`.
-
-> This is the **Local brain** for [Obedient Beast](README.md). Beast connects to this server when you use `/lfm` mode. See [README.md](README.md) for the full project overview.
-
-## Usage
+Human setup, Qwen3.8 default, and how to start Beast: **[README.md](README.md)**.
 
 ```bash
-# Interactive model selection
-python lfm_thinking.py
-
-# Serve the most recently modified model
-python lfm_thinking.py --model latest --server
-
-# Serve a specific model by substring match
-python lfm_thinking.py --model Qwen3 --server
-
-# Custom port
-python lfm_thinking.py --model latest --server --port 9000
-
-# List available models
-python lfm_thinking.py --list
+python lfm_thinking.py --model Qwen3.8-27B-mxfp8 --server
+# or via Beast:
+cd obedient_beast && ./start.sh cli
 ```
 
-## PM2 — Run as a Managed Background Service
+Hot-swap: `POST /v1/models/switch` or Beast `/model`. Verbose parse logs: `LFM_VERBOSE=1`.
 
-Copy/paste to start:
-
-```bash
-pm2 start /Users/jonathanrothberg/Agents/lfm_thinking.py \
-  --name lfm-thinking --interpreter python3 \
-  --max-restarts 3 --restart-delay 10000 \
-  -- --model Qwen3.5-122B --server
-```
-
-This serves the **Qwen3.5-122B-A10B-MLX-9bit** model from `/Users/jonathanrothberg/MLX_Models/`.
-
-> **Why `--max-restarts 3` and `--restart-delay 10000`?** Large models (e.g. 122B params)
-> can take a long time to load into memory. Without these flags, pm2 will kill the process
-> during loading and restart it in an infinite crash loop.
-
-### PM2 Management Commands
-
-```bash
-pm2 status              # check running processes
-pm2 logs lfm-thinking   # view stdout/stderr
-pm2 restart lfm-thinking
-pm2 stop lfm-thinking
-pm2 delete lfm-thinking # remove from pm2 entirely before re-adding
-pm2 save                # persist across reboots (pair with: pm2 startup)
-```
-
-## Hot-Swap Models (no restart needed)
-
-While the server is running, switch models via the API or from Beast:
-
-```bash
-# From Beast CLI or WhatsApp
-/model Qwen3         # switch by name (fuzzy match)
-/model latest        # switch to most recently downloaded
-/model               # list all available models
-
-# Via curl
-curl -X POST http://localhost:8000/v1/models/switch \
-  -H "Content-Type: application/json" \
-  -d '{"model": "GLM"}'
-
-# List all models
-curl http://localhost:8000/v1/models/available
-```
+Linux twin: `linux_thinking.py`. pm2: see [PM2_SETUP.md](PM2_SETUP.md) or `obedient_beast/start.sh pm2`.

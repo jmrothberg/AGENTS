@@ -12,7 +12,7 @@ uvicorn>=0.23.0                   # ASGI server for FastAPI
 pydantic>=2.0.0                   # Data validation for API
 
 # macOS-specific dependencies (Apple Silicon MLX)
-mlx-vlm>=0.0.4                    # MLX Vision Language Models for macOS
+mlx-vlm>=0.6.8                    # Qwen3.8 VLM (Qwen3VLProcessor) needs 0.6.8+; 0.4.x crashes on load
 torchvision>=0.15.0               # Required by mlx_vlm for LFM model processor
 
 # Ubuntu/Linux-specific dependencies (CUDA/CPU)

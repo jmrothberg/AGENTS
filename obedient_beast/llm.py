@@ -32,9 +32,9 @@ import os
 import json
 from dataclasses import dataclass
 from typing import Optional
-from dotenv import load_dotenv
+from capabilities import load_beast_env
 
-load_dotenv()
+load_beast_env()
 
 # ---------------------------------------------------------------------------
 # Config from environment
@@ -48,6 +48,18 @@ BACKEND = os.getenv("LLM_BACKEND_TEST") or os.getenv("LLM_BACKEND", "lfm")  # "l
 LFM_URL = os.getenv("LFM_URL", "http://localhost:8000")
 LFM_URL_LOCAL = "http://localhost:8000"  # Always try local first
 LFM_URL_REMOTE = os.getenv("LFM_URL_REMOTE", "http://192.168.7.57:8000")  # Fallback
+
+# Qwen3.8 thinking knobs — ignored by Claude/OpenAI. Defaults suit agents, not max chat.
+def _env_bool(name: str, default: bool) -> bool:
+    v = os.getenv(name)
+    if v is None:
+        return default
+    return v.strip().lower() in ("1", "true", "yes", "on")
+
+QWEN_REASONING_EFFORT = os.getenv("QWEN_REASONING_EFFORT", "medium")
+QWEN_ENABLE_THINKING = _env_bool("QWEN_ENABLE_THINKING", True)
+QWEN_PRESERVE_THINKING = _env_bool("QWEN_PRESERVE_THINKING", True)
+LFM_MAX_TOKENS = int(os.getenv("LFM_MAX_TOKENS", "16384"))
 
 # Cloud API keys (only needed when using respective backends)
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")
@@ -68,6 +80,7 @@ class LLMResponse:
     text: str              # The text portion of the response (may be empty if only tool calls)
     tool_calls: list[ToolCall]  # Zero or more tool calls the LLM wants to make
     raw: dict              # Original response for debugging
+    reasoning: str = ""    # Qwen <think> block, if any (not shown to the user)
 
 
 class LLM:
@@ -257,23 +270,18 @@ class LLM:
         import re
         import uuid
 
-        # Build tool description for the prompt (text-based, works with any model).
-        # NOTE: lfm_thinking.py adds its own detailed tool prompt with priority
-        # ordering, so we keep this short to avoid duplication/confusion.
-        # The format MUST say ```tool_call (not ```tool) to match the server-side
-        # prompt and parser.
+        # Short reminder only — the OpenAI tools array is the catalog.
         tool_prompt = ""
         if tools:
+            # Short reminder only — the OpenAI tools array is the catalog.
+            # Qwen3.8 may emit <tool_call> or ```tool_call```; both are parsed.
             tool_prompt = (
-                "\n\nYou have tools available. To use one, output ONLY a tool_call block:\n"
-                "```tool_call\n"
-                "{\"name\": \"tool_name\", \"arguments\": {\"param\": \"value\"}}\n"
-                "```\n"
-                "CRITICAL RULES:\n"
-                "- For drawing/art/images: use generate_art (put a description in the 'prompt' argument).\n"
-                "- For Python code: use run_python (put code in the 'code' argument). NEVER output ```python blocks.\n"
-                "- For HTML pages: use run_html (put HTML in the 'html' argument). NEVER use write_file.\n"
-                "- ALWAYS use a tool when asked to do something. Never just describe what you would do.\n"
+                "\n\nUse the tools from the API when you need to act. "
+                "You may call several independent tools in one turn. "
+                "Formats: ```tool_call\\n{\"name\": \"...\", \"arguments\": {...}}\\n``` "
+                "or <tool_call>{\"name\": \"...\", \"arguments\": {...}}</tool_call>. "
+                "Never retry a tool call that already succeeded. "
+                "When the user's task is done, answer in plain text."
             )
 
         # Prepend system message with tool info injected
@@ -306,7 +314,13 @@ class LLM:
         payload = {
             "model": "lfm",
             "messages": msgs,
-            "max_tokens": 4096,
+            "max_tokens": LFM_MAX_TOKENS,
+            # Qwen3.8 chat-template knobs (other models ignore unknown fields)
+            "chat_template_kwargs": {
+                "enable_thinking": QWEN_ENABLE_THINKING,
+                "preserve_thinking": QWEN_PRESERVE_THINKING,
+                "reasoning_effort": QWEN_REASONING_EFFORT,
+            },
         }
         if openai_tools:
             payload["tools"] = openai_tools
@@ -327,7 +341,7 @@ class LLM:
                     data=data,
                     headers={'Content-Type': 'application/json'}
                 )
-                with urllib.request.urlopen(req, timeout=120) as response:
+                with urllib.request.urlopen(req, timeout=300) as response:
                     result = json.loads(response.read().decode())
                     print(f"[LFM] Connected to {url}", flush=True)
                     break  # Success, stop trying other URLs
@@ -342,13 +356,19 @@ class LLM:
         # Parse response
         msg = result["choices"][0]["message"]
         text = msg.get("content", "") or ""
+        reasoning = msg.get("reasoning_content", "") or ""
         tool_calls = []
 
         # Strategy 1: Check for native tool_calls (if server/model supports it)
         if msg.get("tool_calls"):
+            seen_ids = set()
             for tc in msg["tool_calls"]:
+                tc_id = tc["id"]
+                if tc_id in seen_ids:
+                    continue  # Skip duplicate tool call from server
+                seen_ids.add(tc_id)
                 tool_calls.append(ToolCall(
-                    id=tc["id"],
+                    id=tc_id,
                     name=tc["function"]["name"],
                     args=json.loads(tc["function"]["arguments"])
                 ))
@@ -464,6 +484,18 @@ class LLM:
                     if tc:
                         tool_calls.append(tc)
 
+            # Deduplicate: models sometimes emit the same tool call block
+            # multiple times. Keep only the first occurrence of each (name, args).
+            if len(tool_calls) > 1:
+                seen = set()
+                deduped = []
+                for tc in tool_calls:
+                    key = (tc.name, json.dumps(tc.args, sort_keys=True, default=str))
+                    if key not in seen:
+                        seen.add(key)
+                        deduped.append(tc)
+                tool_calls = deduped
+
             # Clean tool call blocks from the text response so the user
             # only sees the natural language part, not the raw JSON.
             if tool_calls:
@@ -475,7 +507,15 @@ class LLM:
                     text = text.replace(blob, '')
                 text = text.strip()
 
-        return LLMResponse(text=text, tool_calls=tool_calls, raw=result)
+        # If the server didn't split thinking, pull <think> out of visible text.
+        if not reasoning and "<think>" in text:
+            import re as _re
+            m = _re.search(r"<think>([\s\S]*?)</think>", text)
+            if m:
+                reasoning = m.group(1).strip()
+                text = (text[:m.start()] + text[m.end():]).strip()
+
+        return LLMResponse(text=text, tool_calls=tool_calls, raw=result, reasoning=reasoning)
 
 
 # ---------------------------------------------------------------------------
