@@ -5,10 +5,14 @@ Personal agent: CLI + WhatsApp, 30 built-in tools, heartbeat tasks, local memory
 **Setup and how to start:** see the [repo-root README](../README.md). Canonical `.env` is the **repo root**. `lfm` = local model (Qwen by default).
 
 ```bash
-./setup.sh                 # once
-./start.sh cli             # local model + CLI
-./start.sh                 # WhatsApp + heartbeat + CLI
+./setup.sh          # once
+./start.sh phone    # 3 windows: brain, mailbox, WhatsApp — no local client
+./start.sh you      # 4th window only: local client (beast.py, You:) — safe if phone is already up
+./start.sh cli      # brain + local client, no WhatsApp
+./start.sh stop     # stop all
 ```
+
+**Local client** = `beast.py` (type at `You:`). **Not** `lfm_thinking.py` (brain) and **not** `test_client.py` (raw model ping). Full window map: [repo-root README](../README.md).
 
 ## For LLMs (60 seconds)
 

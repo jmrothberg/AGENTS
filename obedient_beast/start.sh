@@ -7,6 +7,8 @@
 #                             whatsapp, heartbeat, CLI). Skips any already running.
 #   ./start.sh phone        - This Mac + WhatsApp: 3 windows (Qwen, server, bridge).
 #                             Forces LFM_URL=localhost and MCP_ENABLED=false.
+#   ./start.sh you          - Local client only (python beast.py). Does not start
+#                             the brain, server, or WhatsApp if those are already up.
 #   ./start.sh cli          - No WhatsApp: local model server + CLI only
 #   ./start.sh pm2          - Start server/whatsapp/heartbeat via pm2 (background,
 #                             auto-restart) + terminal windows for lfm and CLI.
@@ -310,10 +312,16 @@ start_whatsapp() {
 start_cli() {
     # No-WhatsApp path: local model server + CLI
     start_lfm
+    start_you
+}
+
+# Local client only — type at You:. Does not start the brain / mailbox / WhatsApp.
+start_you() {
     if is_running "python.*beast.py"; then
-        echo -e "${YELLOW}⚠ Beast CLI already running${NC}"
+        echo -e "${YELLOW}⚠ Local client (beast.py) already running — skipping${NC}"
     else
-        open_terminal "🐺 Beast CLI" "$ACTIVATE && cd $SCRIPT_DIR && python3 beast.py"
+        open_terminal "🐺 Local client — You:" "$ACTIVATE && cd $SCRIPT_DIR && MCP_ENABLED=false LFM_URL=http://localhost:8000 python3 beast.py"
+        echo -e "${GREEN}Opened the local client (beast.py). Leave the other three windows alone.${NC}"
     fi
 }
 
@@ -406,6 +414,7 @@ case "${1:-all}" in
     heartbeat)  start_heartbeat ;;
     lfm)        start_lfm ;;
     cli)        start_cli ;;
+    you)        start_you ;;
     phone)      start_phone ;;
     stop)       stop_all ;;
     status)     check_status ;;
@@ -416,7 +425,7 @@ case "${1:-all}" in
         ;;
     all|"")     start_all ;;
     *)
-        echo "Usage: $0 {phone|pm2|server|whatsapp|heartbeat|lfm|cli|stop|status|clear-history}"
+        echo "Usage: $0 {phone|you|pm2|server|whatsapp|heartbeat|lfm|cli|stop|status|clear-history}"
         exit 1
         ;;
 esac

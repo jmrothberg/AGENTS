@@ -2,95 +2,69 @@
 
 **Author:** Jonathan M Rothberg
 
-## Next time: this Mac + WhatsApp (the three windows)
+There are **four pieces**. Only one of them is a chat window.
 
-```bash
-cd /Users/jonathanrothberg/Agents
-./obedient_beast/start.sh phone
-```
+| Piece | File in this repo | Terminal title | What it is |
+|-------|-------------------|----------------|------------|
+| **Brain** | `lfm_thinking.py` | LFM Thinking | Loads Qwen on port **8000**. Wait until it says the API is ready. **Do not type chat here.** |
+| **Mailbox** | `obedient_beast/server.py` | Beast Server | WhatsApp texts land on port **5001**, then this process asks the brain. |
+| **Phone link** | `obedient_beast/whatsapp/bridge.js` | WhatsApp Bridge | Connects your phone. Scan a QR only if it appears. |
+| **Local client** | `obedient_beast/beast.py` | Local client — You: | **This is where you type.** Prompt is `You:`. Same Beast as WhatsApp (tools, memory, `/lfm` `/claude` `/openai`). |
 
-Leave all three windows open. Do not close them while you want WhatsApp to work.
+WhatsApp does **not** use the local-client window. The local client does **not** use the mailbox or the bridge. Both need the brain.
 
-| Window | What it does |
-|--------|----------------|
-| **LFM Thinking** (the brain) | Loads Qwen on this Mac (port 8000). Wait until it says the API is ready — a few minutes. If this window dies, WhatsApp has nobody to talk to. |
-| **Beast Server** (the mailbox) | Listens on port 5001. Your phone’s texts land here, then this process asks the brain. Started with `LFM_URL=http://localhost:8000` (this Mac, not a remote box) and `MCP_ENABLED=false` (skips the MCP hang). |
-| **WhatsApp Bridge** (the phone link) | Connects WhatsApp to the mailbox. Scan the QR if it appears (WhatsApp → Settings → Linked Devices → Link a device). If you already linked recently, it just says connected. |
-
-Text your own WhatsApp only after the brain window has finished loading. Stop everything with `./obedient_beast/start.sh stop`.
+`test_client.py` (repo root) is a raw ping of `:8000` with **no** Beast tools. It is not the local client.
 
 ---
 
-Two projects in one repo:
+## Commands (from `/Users/jonathanrothberg/Agents`)
 
-1. **Local LLM servers** (`lfm_thinking.py` on macOS/MLX, `linux_thinking.py` on Linux/transformers) — discover models on disk and serve an OpenAI-compatible API.
-2. **Obedient Beast** (`obedient_beast/`) — a personal agent with CLI, WhatsApp, tools, heartbeat tasks, and memory.
+First time only: `./obedient_beast/setup.sh`
 
-**lfm = local model.** The name is leftover from LiquidAI. `LLM_BACKEND=lfm`, `LFM_URL`, and `/lfm` work with Qwen (default), GLM, Llama, or anything the local server loads. Claude and OpenAI stay one `/claude` or `/openai` (or `.env`) switch away.
+| You want | Run | What opens |
+|----------|-----|------------|
+| Phone working on this Mac | `./obedient_beast/start.sh phone` | **3 windows:** brain, mailbox, WhatsApp. **No local client.** |
+| Type in Terminal **and** the 3 are already up | `./obedient_beast/start.sh you` | **1 window:** `beast.py` only. Will not start a second brain. |
+| Type in Terminal, no WhatsApp | `./obedient_beast/start.sh cli` | Brain + local client. |
+| Stop them | `./obedient_beast/start.sh stop` | Kills brain, mailbox, WhatsApp, local client, heartbeat. |
 
-Default local weights: **Qwen3.8-27B-mxfp8** under `/Users/jonathanrothberg/MLX_Models/`.
+Typical night: `start.sh phone`, wait for the brain, then `start.sh you`, then type at `You:` **or** text WhatsApp.
 
----
+`phone` / `you` force `LFM_URL=http://localhost:8000` and `MCP_ENABLED=false` so this Mac is used and MCP does not hang.
 
-## Quick start
-
-```bash
-cd Agents
-./obedient_beast/setup.sh          # venv + both requirements.txt + repo-root .env
-# ./obedient_beast/setup.sh --no-node   # skip WhatsApp / Node.js
-
-# This Mac + WhatsApp (3 windows: brain, mailbox, phone link)
-./obedient_beast/start.sh phone
-
-# Chat only (local model + CLI)
-./obedient_beast/start.sh cli
-
-# Full stack (WhatsApp + heartbeat + CLI)
-./obedient_beast/start.sh
-```
-
-Canonical config is **repo-root `.env`** (created by setup, template: [`.env.example`](.env.example)). `LLM_BACKEND=lfm` and `LFM_URL=http://localhost:8000` (no `/v1` suffix).
-
-Switch brains without restarting setup: `/lfm`, `/claude`, `/openai`, or `/model Qwen3.8`.
+Leave those windows open. Do not text or type until the brain says it is ready.
 
 ---
 
-## Repo layout
+## Repo layout (where the local client lives)
 
 ```
 Agents/
-├── README.md                 ← you are here (human setup)
-├── CLAUDE.md                 ← short onboarding for LLMs
-├── lfm_thinking.py           ← macOS/MLX local LLM server
-├── linux_thinking.py         ← Linux/transformers local LLM server
-├── flux_art.py / flux_art_linux.py
-├── zimage_art_linux.py       ← Beast generate_art on Linux (Z-Image-Turbo)
-├── .env.example              ← copy to .env at this root
-├── requirements.txt          ← server deps (mlx-lm / fastapi / …)
-└── obedient_beast/           ← the agent (see its README for slash commands)
-    ├── beast.py              ← agent loop + 30 built-in tools
-    ├── llm.py                ← Claude / OpenAI / local client
-    ├── setup.sh / start.sh
-    └── workspace/SOUL.md     ← personality
+├── README.md                      ← you are here
+├── lfm_thinking.py                ← BRAIN (not a chat window)
+├── linux_thinking.py              ← Linux brain
+├── test_client.py                 ← raw :8000 ping — NOT the local client
+├── flux_art.py / zimage_art_linux.py
+├── .env.example
+└── obedient_beast/
+    ├── beast.py                   ← LOCAL CLIENT  (python beast.py → You:)
+    ├── server.py                  ← mailbox (:5001)
+    ├── whatsapp/bridge.js         ← phone link
+    ├── start.sh                   ← phone | you | cli | stop
+    ├── llm.py                     ← Claude / OpenAI / local brain
+    └── workspace/SOUL.md
 ```
 
 ---
 
-## Two ways to run Beast
+Two projects: local model servers, and Obedient Beast (CLI + WhatsApp). **lfm** means local model (legacy LiquidAI name). Default weights: **Qwen3.8-27B-mxfp8** in `/Users/jonathanrothberg/MLX_Models/`. Canonical `.env` is **repo root**. Switch brains in a chat with `/lfm`, `/claude`, `/openai`.
 
-| Command | What starts |
-|---------|-------------|
-| `./obedient_beast/start.sh phone` | This Mac’s Qwen + WhatsApp (3 windows; localhost, no MCP) |
-| `./obedient_beast/start.sh cli` | Local model server + CLI (no WhatsApp) |
-| `./obedient_beast/start.sh` | Full stack: model, HTTP server, WhatsApp, heartbeat, CLI |
-| `./obedient_beast/start.sh pm2` | Same as full, with server/WhatsApp/heartbeat under pm2 |
+`./obedient_beast/start.sh` (no argument) is the old five-window stack (adds heartbeat + CLI). `./obedient_beast/start.sh pm2` backgrounds mailbox/WhatsApp/heartbeat.
 
-`LFM_MODEL` (env or `.env`, default `Qwen3.8-27B-mxfp8`) picks weights. If that folder is missing, the interactive picker opens.
-
-Local models live in `/Users/jonathanrothberg/MLX_Models/` (macOS) or `MODEL_SEARCH_PATHS` (Linux).
+`LFM_MODEL` (env or `.env`) picks weights for `start.sh`. Missing folder → interactive picker.
 
 ```bash
-python lfm_thinking.py --model Qwen3.8-27B-mxfp8 --server   # API on :8000
+python lfm_thinking.py --model Qwen3.8-27B-mxfp8 --server   # brain on :8000
 python linux_thinking.py --model latest --server            # Linux twin
 ```
 
@@ -167,6 +141,7 @@ Repo-root `.env`. Important knobs:
 
 ## Troubleshooting
 
+- **No `You:` prompt** → the local client is not running. `start.sh phone` does not open it. Run `./obedient_beast/start.sh you`.
 - **Local LLM timing out** → `lfm_thinking.py --server` running, `LFM_URL=http://localhost:8000`.
 - **`.env` not picked up** → file must be at repo root; Beast loads it even when cwd is `obedient_beast/`.
 - **Too few / too many tools** → `/tools` to list, `/tools all` or `/tools core,browser,desktop`.
