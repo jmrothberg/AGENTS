@@ -61,6 +61,44 @@ CONFIG_DIR.mkdir(exist_ok=True)
 MCP_SERVERS_FILE = CONFIG_DIR / "mcp_servers.json"
 
 
+def _read_mcp_message(stdout) -> Optional[dict]:
+    """
+    Read one MCP JSON-RPC message from a binary stdout stream.
+    Supports Content-Length framing (current MCP SDK) and newline JSON (older).
+    Returns None on EOF.
+    """
+    header_line = stdout.readline()
+    if not header_line:
+        return None
+
+    # Skip npx/npm junk until we see JSON or a Content-Length header
+    while header_line and not (
+        header_line.startswith(b"{")
+        or header_line.lower().startswith(b"content-length:")
+    ):
+        header_line = stdout.readline()
+        if not header_line:
+            return None
+
+    if header_line.lower().startswith(b"content-length:"):
+        try:
+            length = int(header_line.split(b":", 1)[1].strip())
+        except ValueError:
+            return None
+        # Consume remaining headers until blank line
+        while True:
+            line = stdout.readline()
+            if not line or line in (b"\r\n", b"\n"):
+                break
+        body = stdout.read(length)
+        if not body:
+            return None
+        return json.loads(body.decode("utf-8"))
+
+    # Newline-delimited JSON (legacy)
+    return json.loads(header_line.decode("utf-8").strip())
+
+
 @dataclass
 class MCPTool:
     """Represents a tool from an MCP server."""
@@ -126,6 +164,7 @@ class MCPClient:
         except ImportError:
             MCP_ALLOWED_TIERS = ["essential", "extended", "cloud"]  # Default: allow all
 
+        to_start = []
         for name, server_config in config.get("servers", {}).items():
             # Skip disabled servers
             if not server_config.get("enabled", True):
@@ -138,15 +177,26 @@ class MCPClient:
                 print(f"[MCP] Skipping {name} (tier '{server_tier}' not in allowed tiers: {MCP_ALLOWED_TIERS})")
                 continue
 
+            to_start.append((name, server_config, server_tier))
+
+        if not to_start:
+            return
+
+        # Start in parallel so one hung npx does not block the rest (3×20s → 20s).
+        def _boot(item):
+            name, server_config, server_tier = item
             try:
                 self._start_server(name, server_config)
                 print(f"[MCP] Started server: {name} (tier: {server_tier})")
             except Exception as e:
                 print(f"[MCP] Failed to start {name}: {e}")
-                # Drop a hung/dead process so later servers still start
                 srv = self.servers.pop(name, None)
                 if srv and srv.process and srv.process.poll() is None:
                     srv.process.kill()
+
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+        with ThreadPoolExecutor(max_workers=min(6, len(to_start))) as pool:
+            list(as_completed([pool.submit(_boot, item) for item in to_start]))
 
     def _start_server(self, name: str, config: dict):
         """
@@ -167,15 +217,18 @@ class MCPClient:
             elif value:
                 env[key] = value
 
-        # Start the server process with JSON-RPC over stdio
+        # Quiet npx/npm so they do not spam stdout and break the JSON-RPC stream
+        env.setdefault("NPM_CONFIG_LOGLEVEL", "error")
+        env.setdefault("NO_UPDATE_NOTIFIER", "1")
+
+        # Binary stdio: MCP uses Content-Length framing (bytes), not text lines.
         process = subprocess.Popen(
             command,
-            stdin=subprocess.PIPE,   # We write JSON-RPC requests here
-            stdout=subprocess.PIPE,  # We read JSON-RPC responses here
-            stderr=subprocess.PIPE,  # Drained below so npx/server logs cannot fill the pipe
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
             env=env,
-            text=True,
-            bufsize=1  # Line-buffered for JSON-RPC (one JSON object per line)
+            bufsize=0,
         )
 
         blocked_tools = config.get("blocked_tools", [])
@@ -184,28 +237,26 @@ class MCPClient:
         # Drain stderr. PIPE without a reader deadlocks when npx prints download progress.
         def drain_stderr():
             try:
-                while process.stderr and process.stderr.readline():
-                    pass
+                while process.stderr:
+                    chunk = process.stderr.read(4096)
+                    if not chunk:
+                        break
             except Exception:
                 pass
 
         threading.Thread(target=drain_stderr, daemon=True).start()
 
-        # Start a dedicated reader thread for this server.
-        # The thread reads JSON-RPC responses from stdout and puts them on
-        # the response queue. The main thread can then pick them up with
-        # a blocking get() call.
         def read_responses():
+            stdout = process.stdout
             while True:
                 try:
-                    line = process.stdout.readline()
-                    if not line:
-                        break  # Process exited, stdout closed
-                    response = json.loads(line)
-                    server.response_queue.put(response)
+                    msg = _read_mcp_message(stdout)
+                    if msg is None:
+                        break
+                    server.response_queue.put(msg)
                 except Exception as e:
                     if process.poll() is not None:
-                        break  # Process has exited
+                        break
                     print(f"[MCP] {name} read error: {e}")
 
         server.reader_thread = threading.Thread(target=read_responses, daemon=True)
@@ -218,6 +269,13 @@ class MCPClient:
 
         # Discover available tools from this server
         self._discover_tools(name)
+
+    def _write_message(self, server: MCPServer, payload: dict):
+        """Write one MCP JSON-RPC message with Content-Length framing."""
+        body = json.dumps(payload).encode("utf-8")
+        header = f"Content-Length: {len(body)}\r\n\r\n".encode("ascii")
+        server.process.stdin.write(header + body)
+        server.process.stdin.flush()
 
     def _send_request(self, server_name: str, method: str, params: dict = None, timeout: float = None) -> dict:
         """
@@ -237,9 +295,7 @@ class MCPClient:
         if params:
             request["params"] = params
 
-        # Write request to server's stdin (one JSON object per line)
-        server.process.stdin.write(json.dumps(request) + "\n")
-        server.process.stdin.flush()
+        self._write_message(server, request)
 
         # Wait for the matching response from the reader thread (with timeout).
         # MCP servers may send notifications (no "id" field) — skip those.
@@ -278,12 +334,10 @@ class MCPClient:
 
         # Send "initialized" notification (no response expected)
         server = self.servers[server_name]
-        notification = {
+        self._write_message(server, {
             "jsonrpc": "2.0",
             "method": "notifications/initialized"
-        }
-        server.process.stdin.write(json.dumps(notification) + "\n")
-        server.process.stdin.flush()
+        })
 
     def _discover_tools(self, server_name: str):
         """

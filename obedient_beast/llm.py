@@ -63,6 +63,23 @@ LFM_URL = os.getenv("LFM_URL", "http://localhost:8000")
 LFM_URL_LOCAL = "http://localhost:8000"  # Always try local first
 # Empty unless set — do not assume a LAN IP.
 LFM_URL_REMOTE = (os.getenv("LFM_URL_REMOTE") or "").strip()
+# Off by default: a dead LAN box (Errno 60) used to stall every WhatsApp turn ~60s.
+LFM_TRY_REMOTE = os.getenv("LFM_TRY_REMOTE", "false").lower() in ("1", "true", "yes", "on")
+_lfm_dead_urls: set[str] = set()
+
+
+def lfm_urls_to_try() -> list:
+    """Localhost only, unless LFM_TRY_REMOTE=true. Never put a dead LAN IP first."""
+    urls = [LFM_URL_LOCAL]
+    if not LFM_TRY_REMOTE:
+        return urls
+    for u in (LFM_URL, LFM_URL_REMOTE):
+        if not u or u in urls or u in _lfm_dead_urls:
+            continue
+        if "localhost" in u or "127.0.0.1" in u:
+            continue
+        urls.append(u)
+    return urls
 
 # Qwen3.8 thinking knobs — ignored by Claude/OpenAI. Defaults suit agents, not max chat.
 def _env_bool(name: str, default: bool) -> bool:
@@ -324,30 +341,31 @@ class LLM:
 
         data = json.dumps(payload).encode('utf-8')
 
-        # URL fallback: LFM_URL (if custom) → localhost → LFM_URL_REMOTE (if set)
-        urls_to_try = [LFM_URL_LOCAL]
-        if LFM_URL_REMOTE:
-            urls_to_try.append(LFM_URL_REMOTE)
-        if LFM_URL and LFM_URL not in urls_to_try:
-            urls_to_try.insert(0, LFM_URL)
+        urls_to_try = lfm_urls_to_try()
 
         result = None
         last_error = None
         for url in urls_to_try:
+            is_local = "localhost" in url or "127.0.0.1" in url
             try:
                 req = urllib.request.Request(
                     f"{url}/v1/chat/completions",
                     data=data,
                     headers={'Content-Type': 'application/json'}
                 )
-                with urllib.request.urlopen(req, timeout=300) as response:
+                # Remote connect must fail fast; local inference can take minutes
+                with urllib.request.urlopen(req, timeout=300 if is_local else 2) as response:
                     result = json.loads(response.read().decode())
                     print(f"[LFM] Connected to {url}", flush=True)
-                    break  # Success, stop trying other URLs
+                    break
             except (urllib.error.URLError, urllib.error.HTTPError, TimeoutError) as e:
                 last_error = e
-                print(f"[LFM] {url} unavailable: {e}", flush=True)
-                continue  # Try next URL
+                if not is_local:
+                    _lfm_dead_urls.add(url)
+                # Keep logs quiet — a dead remote used to spam every tool turn
+                if is_local:
+                    print(f"[LFM] {url} unavailable: {e}", flush=True)
+                continue
 
         if result is None:
             raise ConnectionError(f"All LFM servers unavailable. Last error: {last_error}")

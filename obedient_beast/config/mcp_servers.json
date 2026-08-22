@@ -1,14 +1,14 @@
 {
   "servers": {
     "filesystem": {
-      "enabled": true,
+      "enabled": false,
       "command": "npx -y @modelcontextprotocol/server-filesystem /Users/jonathanrothberg",
       "description": "Read/write/search files anywhere on your computer",
       "local": true,
       "tier": "essential"
     },
     "memory": {
-      "enabled": true,
+      "enabled": false,
       "command": "npx -y @modelcontextprotocol/server-memory",
       "description": "In-process knowledge graph for entity/relationship memory. Stores facts as nodes with typed edges (e.g., 'user prefers dark mode' linked to 'user works on project X'). Richer than flat memory.json — supports semantic search and relationship traversal. NOTE: ephemeral — runs as an npx subprocess and resets when Beast restarts. Persistent facts are saved to workspace/memory.json independently.",
       "local": true,
@@ -59,14 +59,14 @@
       "tier": "extended"
     },
     "apple-calendar": {
-      "enabled": true,
+      "enabled": false,
       "command": "npx -y mcp-server-apple-events",
       "description": "Read/write macOS Calendar events and Reminders via Apple EventKit (self-contained Swift bridge)",
       "local": true,
       "tier": "essential"
     },
     "apple-mail": {
-      "enabled": true,
+      "enabled": false,
       "command": "npx -y apple-mail-mcp",
       "description": "Read and search macOS Mail.app emails (read-only — send/compose tools blocked)",
       "local": true,
@@ -75,7 +75,7 @@
       "note": "Read-only mode. Remove entries from blocked_tools to enable write actions (add guardrails in beast.py first)."
     },
     "brave-search": {
-      "enabled": true,
+      "enabled": false,
       "command": "npx -y @modelcontextprotocol/server-brave-search",
       "description": "Web search via Brave Search API. Set BRAVE_API_KEY in the repo-root .env (not in this file).",
       "local": false,

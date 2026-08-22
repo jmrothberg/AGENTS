@@ -81,26 +81,40 @@ from llm import get_llm, ToolCall
 # Default false — npx MCP servers can hang CLI startup. Set MCP_ENABLED=true to load.
 # start.sh phone|you also force false. If unset, this is false (matches .env.example).
 MCP_ENABLED = os.getenv("MCP_ENABLED", "false").lower() == "true"
-_mcp_client = None  # Singleton MCP client, lazily initialized on first use
+_mcp_client = None  # Singleton MCP client, lazily initialized
+_mcp_starting = False
 
 
 def get_mcp_tools() -> list[dict]:
     """
-    Get MCP tools if MCP is enabled and servers are running.
-    Returns tools in Beast's internal format (name/description/params dict).
-    Lazily initializes the MCP client on first call.
+    Get MCP tools if enabled. Start servers in the background so the first
+    WhatsApp/CLI message is not blocked 20s per hung npx process.
+    Weather and other built-in tools work immediately without MCP.
     """
-    global _mcp_client
+    global _mcp_client, _mcp_starting
     if not MCP_ENABLED:
         return []
-    try:
-        from mcp_client import get_mcp_client, init_mcp
-        if _mcp_client is None:
-            _mcp_client = init_mcp()  # Spawns server processes, discovers tools
-        return _mcp_client.get_tools_for_llm()
-    except Exception as e:
-        print(f"[MCP] Not available: {e}", file=sys.stderr)
-        return []
+    if _mcp_client is not None:
+        try:
+            return _mcp_client.get_tools_for_llm()
+        except Exception:
+            return []
+    if not _mcp_starting:
+        _mcp_starting = True
+
+        def _boot_mcp():
+            global _mcp_client, _mcp_starting
+            try:
+                from mcp_client import init_mcp
+                _mcp_client = init_mcp()
+            except Exception as e:
+                print(f"[MCP] Not available: {e}", file=sys.stderr)
+            finally:
+                _mcp_starting = False
+
+        import threading
+        threading.Thread(target=_boot_mcp, daemon=True, name="mcp-boot").start()
+    return []
 
 
 def execute_mcp_tool(name: str, args: dict) -> str:
@@ -687,6 +701,20 @@ TOOLS = [
             "method": "HTTP method: GET or POST (default: GET)"
         }
     },
+    {
+        "name": "web_search",
+        "description": "Search the live internet. Use for news, sports scores, prices, or anything that changes. For weather, prefer get_weather.",
+        "params": {
+            "query": "Search query"
+        }
+    },
+    {
+        "name": "get_weather",
+        "description": "Get live weather and a short forecast for a city. Use this for any weather question. Do not guess.",
+        "params": {
+            "location": "City and state or country (e.g. 'Guilford, Connecticut')"
+        }
+    },
     # ---------------------------------------------------------------------------
     # Sub-Agent Spawning — run an isolated Beast sub-session for a subtask
     # ---------------------------------------------------------------------------
@@ -804,6 +832,143 @@ TOOLS = [
 # Now that TOOLS is defined, compose the system prompt (SOUL + AGENTS + skills).
 # Tool schemas go to the model via the API tools array, not this prompt.
 SYSTEM_PROMPT = load_system_prompt()
+
+
+def _http_get(url: str, headers: dict = None, timeout: int = 20) -> tuple[int, str]:
+    """GET a URL; return (status, body). Uses certifi when available."""
+    import ssl
+    import urllib.request
+    try:
+        import certifi
+        ssl_ctx = ssl.create_default_context(cafile=certifi.where())
+    except ImportError:
+        ssl_ctx = ssl.create_default_context()
+    req = urllib.request.Request(url, method="GET")
+    req.add_header("User-Agent", "ObedientBeast/1.0")
+    for k, v in (headers or {}).items():
+        req.add_header(k, v)
+    with urllib.request.urlopen(req, timeout=timeout, context=ssl_ctx) as resp:
+        return resp.status, resp.read().decode("utf-8", errors="replace")
+
+
+def _get_weather(location: str, days=None) -> str:
+    """Live weather. Try wttr.in, then Open-Meteo, then web_search. No API key."""
+    import json
+    import urllib.parse
+    loc = (location or "").strip() or "Guilford, Connecticut"
+    loc_plus = loc.replace(" ", "+")
+    loc_q = urllib.parse.quote(loc_plus, safe="+")
+    loc_us = urllib.parse.quote(loc.replace(",", "").strip(), safe="")
+
+    wttr_urls = [
+        f"https://wttr.in/{loc_q}?format=3",
+        f"https://wttr.in/{loc_us}?format=3",
+        f"https://wttr.in/{loc_q}?format=%l:+%c+%t+wind+%w",
+    ]
+    for url in wttr_urls:
+        try:
+            _, body = _http_get(url, timeout=8)
+            body = (body or "").strip()
+            if body and not body.lower().startswith(("unknown", "<")):
+                return f"Current: {body}"
+        except Exception:
+            continue
+
+    # Open-Meteo: geocode then current conditions
+    try:
+        q = urllib.parse.quote(loc)
+        _, geo = _http_get(
+            f"https://geocoding-api.open-meteo.com/v1/search?name={q}&count=1&language=en&format=json",
+            timeout=8,
+        )
+        hits = json.loads(geo).get("results") or []
+        if hits:
+            lat, lon = hits[0]["latitude"], hits[0]["longitude"]
+            place = ", ".join(
+                p for p in (hits[0].get("name"), hits[0].get("admin1"), hits[0].get("country")) if p
+            )
+            _, wx = _http_get(
+                f"https://api.open-meteo.com/v1/forecast?latitude={lat}&longitude={lon}"
+                f"&current_weather=true&temperature_unit=fahrenheit&windspeed_unit=mph",
+                timeout=8,
+            )
+            cur = json.loads(wx).get("current_weather") or {}
+            if cur:
+                return (
+                    f"Current: {place}: {cur.get('temperature')}°F, "
+                    f"wind {cur.get('windspeed')} mph, "
+                    f"weather code {cur.get('weathercode')}"
+                )
+    except Exception:
+        pass
+
+    extra = _web_search(f"weather {loc} today")
+    if extra and not extra.lower().startswith("error"):
+        return extra
+    return f"Error: could not get weather for '{loc}'."
+
+
+def _web_search(query: str) -> str:
+    """
+    Live web search. Weather queries also hit wttr.in (no API key).
+    Prefer Brave if BRAVE_API_KEY is set; else DuckDuckGo HTML.
+    """
+    import re
+    import urllib.parse
+    import urllib.error
+
+    if not query:
+        return "Error: web_search needs a query (e.g. 'weather Guilford Connecticut')"
+
+    parts = []
+    brave_key = os.getenv("BRAVE_API_KEY", "").strip()
+    try:
+        if brave_key:
+            q = urllib.parse.quote(query)
+            status, body = _http_get(
+                f"https://api.search.brave.com/res/v1/web/search?q={q}&count=5",
+                headers={
+                    "Accept": "application/json",
+                    "X-Subscription-Token": brave_key,
+                },
+            )
+            data = json.loads(body)
+            results = data.get("web", {}).get("results", [])
+            if results:
+                lines = [f"Web search for '{query}':"]
+                for r in results[:5]:
+                    title = r.get("title", "")
+                    desc = r.get("description", "")
+                    url = r.get("url", "")
+                    lines.append(f"• {title}\n  {desc}\n  {url}")
+                parts.append("\n".join(lines))
+            else:
+                parts.append(f"Brave search returned no results for '{query}'.")
+        else:
+            q = urllib.parse.quote(query)
+            _, html = _http_get(f"https://html.duckduckgo.com/html/?q={q}")
+            titles = re.findall(r'class="result__a"[^>]*>(.*?)</a>', html, re.DOTALL)
+            snippets = re.findall(r'class="result__snippet"[^>]*>(.*?)</(?:a|td)>', html, re.DOTALL)
+            hrefs = re.findall(r'class="result__a"[^>]*href="([^"]+)"', html)
+            if titles:
+                lines = [f"Web search for '{query}':"]
+                for i, title in enumerate(titles[:5]):
+                    title = re.sub(r"<[^>]+>", "", title).strip()
+                    snip = re.sub(r"<[^>]+>", "", snippets[i]).strip() if i < len(snippets) else ""
+                    url = hrefs[i] if i < len(hrefs) else ""
+                    lines.append(f"• {title}\n  {snip}\n  {url}")
+                parts.append("\n".join(lines))
+            else:
+                parts.append(
+                    f"No search snippets for '{query}'. "
+                    "Set BRAVE_API_KEY in .env for better results."
+                )
+    except urllib.error.HTTPError as e:
+        parts.append(f"Search HTTP error {e.code}: {e.reason}")
+    except Exception as e:
+        parts.append(f"Search error: {e}")
+
+    return "\n\n".join(parts) if parts else f"No results for '{query}'."
 
 
 def execute_tool(name: str, args: dict) -> str:
@@ -1105,6 +1270,22 @@ def execute_tool(name: str, args: dict) -> str:
                     body = resp.read().decode("utf-8", errors="replace")
                     status = resp.status
                     # Truncate to 4000 chars to keep LLM context manageable
+                    # Compact wttr.in JSON so the model answers instead of refetching
+                    if "wttr.in" in url and body.lstrip().startswith("{"):
+                        try:
+                            wx = json.loads(body)
+                            cur = (wx.get("current_condition") or [{}])[0]
+                            area = ((wx.get("nearest_area") or [{}])[0].get("areaName") or [{}])[0].get("value", "")
+                            desc = ((cur.get("weatherDesc") or [{}])[0].get("value") or "")
+                            compact = (
+                                f"{area}: {desc}, {cur.get('temp_F')}°F "
+                                f"(feels {cur.get('FeelsLikeF')}°F), "
+                                f"humidity {cur.get('humidity')}%, "
+                                f"wind {cur.get('windspeedMiles')} mph"
+                            )
+                            return f"HTTP {status}\n{compact}"
+                        except Exception:
+                            pass
                     if len(body) > 4000:
                         body = body[:4000] + f"\n... [truncated, {len(body)} total chars]"
                     return f"HTTP {status}\n{body}"
@@ -1114,6 +1295,13 @@ def execute_tool(name: str, args: dict) -> str:
                 return f"URL Error: {e.reason}"
             except Exception as e:
                 return f"Fetch error: {e}"
+
+        elif name == "web_search":
+            return _web_search(args.get("query", "").strip())
+
+        elif name in ("get_weather", "weather", "check_weather"):
+            loc = (args.get("location") or args.get("query") or args.get("city") or "").strip()
+            return _get_weather(loc, args.get("days"))
 
         # === Sub-Agent Spawning ===
         # Runs a full agent loop in a throwaway session, returns final text.
@@ -1361,6 +1549,10 @@ def execute_tool(name: str, args: dict) -> str:
             return execute_mcp_tool(name, args)
 
         else:
+            # Local models sometimes invent a weather tool name
+            if "weather" in name.lower():
+                loc = (args.get("location") or args.get("query") or args.get("city") or "").strip()
+                return _get_weather(loc, args.get("days"))
             return f"Error: Unknown tool: {name}"
 
     except Exception as e:
@@ -1643,7 +1835,7 @@ Just talk to me like a person. I can:
 • Read, write, and edit files ("create a shopping list", "update my notes")
 • Take screenshots and control your mouse/keyboard
 • Remember things for later ("remind me to call the dentist")
-• Search the web (when connected to Brave Search)
+• Search the live web (`web_search` — weather, news, current facts)
 • Fetch data from websites and APIs
 • **Draw art** — "draw a sunset", "paint a cat in space" → local `generate_art` (FLUX on macOS, Z-Image-Turbo on Linux)
 • **Run code in a sandbox** — I write it, run it, you see results:
@@ -1908,13 +2100,8 @@ I'm an AI assistant that lives on your computer. You talk to me (here in the ter
     if cmd == "/model" or cmd.startswith("/model "):
         import urllib.request
         import urllib.error
-        from llm import LFM_URL_LOCAL, LFM_URL_REMOTE, LFM_URL
-        # Try to reach the local model server
-        urls_to_try = [LFM_URL_LOCAL]
-        if LFM_URL_REMOTE:
-            urls_to_try.append(LFM_URL_REMOTE)
-        if LFM_URL and LFM_URL not in urls_to_try:
-            urls_to_try.insert(0, LFM_URL)
+        from llm import lfm_urls_to_try
+        urls_to_try = lfm_urls_to_try()
         server_url = None
         for url in urls_to_try:
             try:
@@ -2276,6 +2463,7 @@ I'm an AI assistant that lives on your computer. You talk to me (here in the ter
     # focuses on describing the image instead of getting confused by 40+ tools.
     # Tools are available on all subsequent turns if the model needs them.
     _image_first_turn = image_path is not None
+    _force_text_next = False  # After a live lookup, answer in text (no more tools)
 
     # --- Loop detection state ---
     # Track the last few (tool_name, args_fingerprint) signatures. If the same
@@ -2287,8 +2475,9 @@ I'm an AI assistant that lives on your computer. You talk to me (here in the ter
 
     for turn in range(DEPTH):
         # Determine tools for this turn
-        turn_tools = None if _image_first_turn else all_tools
-        _image_first_turn = False  # Only skip tools on the very first turn
+        turn_tools = None if (_image_first_turn or _force_text_next) else all_tools
+        _image_first_turn = False
+        _force_text_next = False
 
         # Call LLM with fallback chain — try primary backend, then fallbacks.
         # On fallback, use text-only history to avoid format incompatibilities.
@@ -2366,6 +2555,12 @@ I'm an AI assistant that lives on your computer. You talk to me (here in the ter
                 result_preview = str(result)[:200].replace('\n', ' ')
                 print(f"  ✅ [{tool_call.name}] → {result_preview}", file=sys.stderr)
                 tool_results.append((tool_call, result))
+                # Weather/search already returned data — next turn is text only
+                lookup_names = ("get_weather", "web_search", "weather", "check_weather")
+                url = str((tool_call.args or {}).get("url", ""))
+                if tool_call.name in lookup_names or "wttr.in" in url:
+                    if result and not str(result).lower().startswith("error"):
+                        _force_text_next = True
 
             # --- Loop detection: bail if the agent is spinning ---
             # Signature = tool name + sorted args (stable hash of the call).

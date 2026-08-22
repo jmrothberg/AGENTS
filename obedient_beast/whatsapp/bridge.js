@@ -268,7 +268,8 @@ async function connectToWhatsApp() {
                 const response = await fetch(`${BEAST_URL}/message`, {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify(body)
+                    body: JSON.stringify(body),
+                    signal: AbortSignal.timeout(180000)
                 })
 
                 if (!response.ok) {
@@ -301,12 +302,9 @@ async function connectToWhatsApp() {
                 }
 
             } catch (error) {
+                // Don't spam the WhatsApp group — overlapping/slow local LLM
+                // used to post "Beast server unavailable" while a reply was still coming.
                 console.error('Error calling Beast server:', error.message)
-
-                // Notify user of error in the WhatsApp chat
-                await sock.sendMessage(chatId, {
-                    text: '⚠️ Beast server unavailable. Please try again later.'
-                })
             }
         }
     })

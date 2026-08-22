@@ -101,7 +101,7 @@ MCP_ALLOWED_TIERS = ["essential", "extended", "cloud"]
 TOOL_GROUPS = {
     "core": [
         "shell", "read_file", "write_file", "list_dir", "edit_file",
-        "fetch_url", "recall_memory", "add_task",
+        "fetch_url", "web_search", "get_weather", "recall_memory", "add_task",
         "run_python", "run_html", "list_skills", "use_skill",
     ],
     "browser": [

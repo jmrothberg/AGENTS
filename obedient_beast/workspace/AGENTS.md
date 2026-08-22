@@ -9,7 +9,7 @@ Use `add_task` when the user says things like:
 
 Do NOT use `add_task` when:
 - The user wants something done RIGHT NOW (just do it directly)
-- The user is asking a question (just answer it)
+- The user is asking a question (answer it — but if it is weather/news/current facts, call `web_search` first)
 - The user is chatting (just respond normally)
 
 If unsure, do the task now. Only queue it if the user explicitly says "later" or "remind me".

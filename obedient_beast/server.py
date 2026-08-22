@@ -35,6 +35,7 @@ Usage:
 
 import os
 import json
+import threading
 from flask import Flask, request, jsonify
 from capabilities import load_beast_env
 
@@ -59,6 +60,9 @@ RESPOND_TO_OTHERS = os.getenv("RESPOND_TO_OTHERS", "false").lower() == "true"
 
 # Single LLM instance shared across all requests
 llm = get_llm()
+# One inference at a time — overlapping WhatsApp messages used to collide
+# with the local LLM and make the bridge print "fetch failed".
+_run_lock = threading.Lock()
 
 # ---------------------------------------------------------------------------
 # Dynamic @beast access: OWNER can open/close groups at runtime
@@ -219,8 +223,8 @@ def message():
     session_id = f"wa_{sender.split('@')[0]}"
 
     try:
-        response = run(text, session_id, llm, image_path=image_path)
-        # Show which tools were used (parse from stderr output of beast.run)
+        with _run_lock:
+            response = run(text, session_id, llm, image_path=image_path)
         print(f"[Response] ({len(response)} chars) {response[:200]}...")
 
         # Check if Beast generated an image (e.g., screenshot tool was used).
