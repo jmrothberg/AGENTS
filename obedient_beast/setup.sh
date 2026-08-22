@@ -178,7 +178,8 @@ LFM_URL=http://localhost:8000
 # LFM_URL_REMOTE=http://192.168.1.100:8000
 LFM_MODEL=Qwen3.8-27B-mxfp8
 
-# Qwen3.8 thinking knobs (ignored by Claude/OpenAI)
+# Qwen3.8 thinking knobs as chat_template_kwargs (ignored by Claude/OpenAI;
+# other local models ignore unknown fields). reasoning_effort: low|medium|xhigh
 QWEN_REASONING_EFFORT=medium
 QWEN_ENABLE_THINKING=true
 QWEN_PRESERVE_THINKING=true
@@ -271,16 +272,20 @@ except ImportError as e:
 print_next_steps() {
     echo "Next steps:"
     echo ""
-    echo "  1. (Optional) Edit $PARENT_DIR/.env — default is local Qwen via LLM_BACKEND=lfm"
+    echo "  1. (Optional) Edit $PARENT_DIR/.env — default is local via LLM_BACKEND=lfm (LFM_MODEL)"
     echo ""
-    echo "  2. Chat only (local model + CLI, no WhatsApp):"
+    echo "  2. Typical Mac night (WhatsApp, no extra CLI):"
+    echo -e "     ${YELLOW}cd $SCRIPT_DIR && ./start.sh phone${NC}"
+    echo "     Then, to type in Terminal: ./start.sh you"
+    echo ""
+    echo "  3. Chat only (local model + CLI, no WhatsApp):"
     echo -e "     ${YELLOW}cd $SCRIPT_DIR && ./start.sh cli${NC}"
     echo ""
-    echo "  3. Full stack (WhatsApp + heartbeat + CLI):"
+    echo "  4. Full five-window stack (WhatsApp + heartbeat + CLI):"
     echo -e "     ${YELLOW}cd $SCRIPT_DIR && ./start.sh${NC}"
     echo "     Scan the QR code in the WhatsApp window"
     echo ""
-    echo "  4. Switch brains later: /claude  /openai  /lfm  (or LLM_BACKEND in .env)"
+    echo "  5. Switch brains later: /claude  /openai  /lfm  (or LLM_BACKEND in .env)"
     echo ""
 }
 

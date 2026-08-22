@@ -5,7 +5,7 @@
 # Usage:
 #   ./start.sh              - Full stack: 5 Terminal windows (local model, server,
 #                             whatsapp, heartbeat, CLI). Skips any already running.
-#   ./start.sh phone        - This Mac + WhatsApp: 3 windows (Qwen, server, bridge).
+#   ./start.sh phone        - This Mac + WhatsApp: 3 windows (brain, server, bridge).
 #                             Forces LFM_URL=localhost and MCP_ENABLED=false.
 #   ./start.sh you          - Local client only (python beast.py). Does not start
 #                             the brain, server, or WhatsApp if those are already up.
@@ -50,7 +50,7 @@ echo "============================================================"
 
 # ---------------------------------------------------------------------------
 # Local model name: env LFM_MODEL, else repo-root .env, else Qwen3.8-27B-mxfp8.
-# If that folder is not under MLX_Models, fall back to the interactive picker.
+# macOS: MLX folder under MLX_Models. Linux: linux_thinking.py (transformers).
 # ---------------------------------------------------------------------------
 if [ -z "${LFM_MODEL:-}" ] && [ -f "$PARENT_DIR/.env" ]; then
     LFM_MODEL=$(grep -E '^LFM_MODEL=' "$PARENT_DIR/.env" 2>/dev/null | tail -1 | cut -d= -f2- | tr -d ' "'"'"'')
@@ -74,7 +74,9 @@ mlx_model_exists() {
 }
 
 # Command run in the LFM terminal (cwd = PARENT_DIR)
-if mlx_model_exists; then
+if [[ "$(uname)" == "Linux" ]]; then
+    LFM_CMD="python3 linux_thinking.py --model $LFM_MODEL --server"
+elif mlx_model_exists; then
     LFM_CMD="python3 lfm_thinking.py --model $LFM_MODEL --server"
 else
     echo -e "${YELLOW}Model '$LFM_MODEL' not found in $MLX_MODELS_DIR — using interactive picker${NC}"
@@ -120,6 +122,10 @@ is_running() {
     pgrep -f "$1" > /dev/null 2>&1
 }
 
+brain_running() {
+    is_running "python.*lfm_thinking.py" || is_running "python.*linux_thinking.py"
+}
+
 # ---------------------------------------------------------------------------
 # Start all: 5 separate Terminal windows (default, no pm2)
 # ---------------------------------------------------------------------------
@@ -127,7 +133,7 @@ start_all() {
     echo -e "${GREEN}Opening Terminal windows (skipping any already running)...${NC}"
 
     # 1. LFM Thinking (interactive model picker)
-    if is_running "python.*lfm_thinking.py"; then
+    if brain_running; then
         echo -e "  ${YELLOW}⚠ LFM Thinking already running — skipping${NC}"
     else
         open_terminal "🧠 LFM Thinking" "cd $PARENT_DIR && $ACTIVATE && $LFM_CMD"
@@ -231,7 +237,7 @@ start_pm2() {
     sleep 1
 
     # LFM Thinking — always a terminal window (interactive model picker)
-    if is_running "python.*lfm_thinking.py"; then
+    if brain_running; then
         echo -e "  ${YELLOW}⚠ LFM Thinking already running — skipping${NC}"
     else
         open_terminal "🧠 LFM Thinking" "cd $PARENT_DIR && $ACTIVATE && $LFM_CMD"
@@ -270,7 +276,7 @@ start_pm2() {
 # ---------------------------------------------------------------------------
 
 start_lfm() {
-    if is_running "python.*lfm_thinking.py"; then
+    if brain_running; then
         echo -e "${YELLOW}⚠ LFM Thinking already running${NC}"
     else
         open_terminal "🧠 LFM Thinking" "cd $PARENT_DIR && $ACTIVATE && $LFM_CMD"
@@ -360,6 +366,7 @@ stop_all() {
     echo -e "${YELLOW}Stopping Obedient Beast...${NC}"
 
     pkill -f "python.*lfm_thinking.py" 2>/dev/null && echo "  LFM Thinking stopped"
+    pkill -f "python.*linux_thinking.py" 2>/dev/null && echo "  Linux Thinking stopped"
     pkill -f "python.*server.py"       2>/dev/null && echo "  Server stopped"
     pkill -f "node.*bridge.js"         2>/dev/null && echo "  WhatsApp stopped"
     pkill -f "python.*heartbeat.py"    2>/dev/null && echo "  Heartbeat stopped"
@@ -379,6 +386,7 @@ check_status() {
     echo "Checking status..."
     for proc in \
         "python.*lfm_thinking.py:LFM Thinking" \
+        "python.*linux_thinking.py:Linux Thinking" \
         "python.*server.py:Server" \
         "node.*bridge.js:WhatsApp" \
         "python.*heartbeat.py:Heartbeat" \

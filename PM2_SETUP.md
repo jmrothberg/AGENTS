@@ -2,7 +2,7 @@
 
 Setup and day-to-day start: **[README.md](README.md)** and `obedient_beast/start.sh`.
 
-pm2 runs **server, WhatsApp bridge, heartbeat**. The local model server and Beast CLI stay in terminal windows (`./start.sh pm2` opens those for you).
+pm2 runs **server, WhatsApp bridge, heartbeat**. The local model server and Beast CLI stay in terminal windows (`./start.sh pm2` opens those for you). On Linux, `start.sh` launches `linux_thinking.py`.
 
 ```bash
 cd obedient_beast && ./start.sh pm2

@@ -23,7 +23,7 @@ Architecture Overview:
               │                │                │
     ┌─────────▼──────┐ ┌──────▼──────┐ ┌───────▼────────┐
     │   llm.py       │ │ Built-in    │ │  mcp_client.py │
-    │  (3 backends)  │ │ Tools (18)  │ │  (MCP servers) │
+    │  (3 backends)  │ │ Tools (30)  │ │  (MCP servers) │
     └────────────────┘ └─────────────┘ └────────────────┘
 
 Data Flow:
@@ -41,13 +41,16 @@ Data Flow:
 Tool Count: 30 built-in + N MCP tools (loaded dynamically)
 
 Usage:
-    python beast.py                     # Interactive CLI mode
-    ./start.sh                          # 4 Terminal windows (server, WhatsApp, heartbeat, CLI)
+    python beast.py                     # Interactive CLI mode (You:)
+    ./start.sh phone                    # 3 windows: brain + mailbox + WhatsApp
+    ./start.sh you                      # local client only
+    ./start.sh                          # 5 windows: brain, mailbox, WhatsApp, heartbeat, CLI
 
-Slash commands (work from CLI and WhatsApp):
+Slash commands (work from CLI and WhatsApp unless noted):
     /help, /more, /status, /tasks, /done <id>, /drop <id>,
     /claude, /openai, /lfm, /depth <n>, /model, /heartbeat on|off,
-    /clear, /clear tasks, /clear memory, /clear all, /tools, /skills
+    /clear, /clear tasks, /clear memory, /clear all, /tools, /skills,
+    /boot, /sandbox, /image [path] (CLI), /new (CLI), /quit (CLI)
 """
 
 import os
@@ -75,9 +78,9 @@ from llm import get_llm, ToolCall
 # If MCP is disabled or a server fails, Beast still works fine with
 # its 30 built-in tools — MCP is purely additive.
 
-# Default to true — if you have MCP servers configured, they should load.
-# Set MCP_ENABLED=false in .env only if you explicitly want to disable MCP.
-MCP_ENABLED = os.getenv("MCP_ENABLED", "true").lower() == "true"
+# Default false — npx MCP servers can hang CLI startup. Set MCP_ENABLED=true to load.
+# start.sh phone|you also force false. If unset, this is false (matches .env.example).
+MCP_ENABLED = os.getenv("MCP_ENABLED", "false").lower() == "true"
 _mcp_client = None  # Singleton MCP client, lazily initialized on first use
 
 
@@ -1523,8 +1526,8 @@ def run(user_input: str, session_id: str = "default", llm=None, image_path: str 
 
     Depth (tool-chain limit):
     - "Depth" controls how many tool steps the model can chain (set via /depth).
-    - Cloud default: 10, Local default: 5. Prevents infinite loops.
-    - All tools are always available on every step.
+    - Cloud default: 10, Local default: 8. Prevents infinite loops.
+    - Offered tools are filtered by BEAST_TOOL_GROUPS (local default core,browser,art).
     """
     # Apply backend override if set (from /claude /openai /lfm commands)
     global _backend_override
@@ -1642,7 +1645,7 @@ Just talk to me like a person. I can:
 • Remember things for later ("remind me to call the dentist")
 • Search the web (when connected to Brave Search)
 • Fetch data from websites and APIs
-• **Draw art** — "draw a sunset", "paint a cat in space" → AI image generation (FLUX.2-klein-4B, runs locally)
+• **Draw art** — "draw a sunset", "paint a cat in space" → local `generate_art` (FLUX on macOS, Z-Image-Turbo on Linux)
 • **Run code in a sandbox** — I write it, run it, you see results:
   `run_python` → text output + images sent to you automatically
   `run_html` → page opens in browser + screenshot sent via WhatsApp
@@ -1669,7 +1672,7 @@ Currently: **{TIER_LABEL}** — depth {DEPTH} (chains up to {DEPTH} steps per re
 `/clear` — clear chat history (`/clear tasks`, `/clear memory`, `/clear all`)
 `/tools` — list abilities (`/tools all` or `/tools core,browser,desktop`)
 `/sandbox` — list recent sandbox runs (Python scripts, HTML pages)
-`/skills` — installable MCP plug-in skills
+`/skills` — MCP server catalog (markdown runbooks: `list_skills` / `use_skill`)
 `/more` — detailed guide with examples
 `/new` — start fresh conversation (CLI only)
 `/quit` — exit (CLI only)
@@ -1705,16 +1708,16 @@ I'm an AI assistant that lives on your computer. You talk to me (here in the ter
      Best for: research, multi-file editing, hard questions.
      Switch: `/claude` or `/openai`
 
-  🏠 **Local** — A model running on your machine (e.g. Qwen3.5-122B)
+  🏠 **Local** — A model running on your machine (default: `LFM_MODEL`, currently Qwen3.8-27B-class)
      Your data never leaves your computer. Totally private.
      Strong local models can chain multiple steps, just like cloud.
-     Switch: `/lfm` — swap models with `/model`
+     Switch: `/lfm` — swap weights with `/model` (no Beast restart)
 
 **Depth (how many steps I can chain):**
   When you ask me something complex, I may need multiple steps —
   search the web, then fetch a page, then summarize it.
   "Depth" controls how many steps I can chain per request.
-  • Cloud default: 10 steps — Local default: 5 steps
+  • Cloud default: 10 steps — Local default: 8 steps
   • Change it anytime: `/depth 3` (fewer steps = faster, simpler)
   • Current depth: {DEPTH}
 
@@ -1781,9 +1784,10 @@ I'm an AI assistant that lives on your computer. You talk to me (here in the ter
   errors out mid-request, I retry with the next one using a
   text-only history so there are no format mismatches.
 
-**🎨 Art Generation (FLUX.2-klein-4B):**
-  Ask me to draw, paint, or create any image. I use a local AI art
-  model running on Apple Silicon — no cloud API needed.
+**🎨 Art Generation:**
+  Ask me to draw, paint, or create any image. `generate_art` uses a local
+  model: FLUX.2-klein on macOS Apple Silicon, Z-Image-Turbo on Linux CUDA.
+  No cloud image API.
 
   Examples:
   • "draw a sunset over the ocean with a sailboat"
@@ -1840,7 +1844,7 @@ I'm an AI assistant that lives on your computer. You talk to me (here in the ter
   `/clear` — clear history (`/clear tasks`, `/clear memory`, `/clear all`)
   `/tools` — list abilities (`/tools all` or `/tools core,browser,desktop`)
   `/sandbox` — list recent sandbox runs
-  `/skills` — list installable MCP skills
+  `/skills` — MCP server catalog (markdown skills: `list_skills` tool)
   `/claude` — switch to Cloud (Claude)
   `/openai` — switch to Cloud (OpenAI)
   `/lfm` — switch to Local brain
@@ -1906,8 +1910,10 @@ I'm an AI assistant that lives on your computer. You talk to me (here in the ter
         import urllib.error
         from llm import LFM_URL_LOCAL, LFM_URL_REMOTE, LFM_URL
         # Try to reach the local model server
-        urls_to_try = [LFM_URL_LOCAL, LFM_URL_REMOTE]
-        if LFM_URL not in urls_to_try:
+        urls_to_try = [LFM_URL_LOCAL]
+        if LFM_URL_REMOTE:
+            urls_to_try.append(LFM_URL_REMOTE)
+        if LFM_URL and LFM_URL not in urls_to_try:
             urls_to_try.insert(0, LFM_URL)
         server_url = None
         for url in urls_to_try:
@@ -1918,7 +1924,7 @@ I'm an AI assistant that lives on your computer. You talk to me (here in the ter
             except Exception:
                 continue
         if not server_url:
-            return "❌ Local model server not reachable. Start it with:\n  `python lfm_thinking.py --model latest --server`"
+            return "❌ Local model server not reachable. Start it with:\n  `python lfm_thinking.py --model latest --server`\n  (Linux: `python linux_thinking.py --model latest --server`)"
 
         arg = cmd[len("/model"):].strip()
 
@@ -2428,6 +2434,7 @@ I'm an AI assistant that lives on your computer. You talk to me (here in the ter
                     tool_result_msg = {
                         "role": "tool",
                         "tool_call_id": tool_call.id,
+                        "name": tool_call.name,
                         "content": result
                     }
                     history.append(tool_result_msg)

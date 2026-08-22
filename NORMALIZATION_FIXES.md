@@ -1,5 +1,20 @@
 # Anthropic Format Normalization — Bug Fixes to Apply
 
+**Status as of 2026-08-22** (code vs this note):
+
+| Fix | Status |
+|-----|--------|
+| 1. `format_tools_for_prompt()` Anthropic `input_schema` | **Obsolete.** The helper is now a short reminder; the OpenAI tools array is the catalog. |
+| 2. Orphan `</think>` / `<tool_call>` tags | **Done** in `local_harness.clean_tool_calls_from_text()`. |
+| 3. Always clean visible text | **Done** in `lfm_thinking.py` (clean after `split_thinking`, whether or not tools parsed). |
+| 4. Neutral `[Used tool …]` history flattening | **Superseded.** Servers flatten to `User:` / `Assistant:` / `[Tool Result]:` (see FUTURE_UPGRADES — pass native messages instead). |
+| 5. `LFM_SINGLE_TOOL_MODE` → `LFM_MAX_TOOL_TURNS` | **Obsolete.** `SINGLE_TOOL_MODE = False`; Beast loops up to `DEPTH` (local 8). |
+| 6. Verbose per-tool prompt dump | **Rejected on purpose.** Dumping every schema into the prompt doubled tokens on a 27B; tools go via the API array plus a short reminder. |
+
+The original write-up is kept below. Do not apply Fix 1 or 6 as written.
+
+---
+
 These fixes were discovered during testing of the Anthropic Messages API normalization work.
 The full normalization (single canonical format) was too large to merge cleanly with the
 Phase 4 features, but these targeted fixes are independently valuable and can be applied

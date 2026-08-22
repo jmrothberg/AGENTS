@@ -7,10 +7,11 @@ checks the task queue and processes pending tasks via beast.run().
 
 How it works:
 ~~~~~~~~~~~~~
-1. Heartbeat wakes up every N minutes (5 min FULL, 10 min LITE)
+1. Heartbeat wakes up every N minutes (5 min cloud, 10 min local)
 2. Checks workspace/tasks.json for pending tasks
 3. Picks the highest-priority task and feeds it to beast.run()
-4. Beast processes it (using tools as needed) and marks it done/failed
+4. After run() returns, heartbeat marks one-shots done (or failed on error);
+   recurring tasks (cron / repeat_seconds) are rescheduled in code
 5. Goes back to sleep
 
 Graceful shutdown pattern:
@@ -189,9 +190,10 @@ def _write_notification(task: dict, result: str):
 def process_task(task: dict, llm) -> str:
     """
     Process a single task by calling beast.run() with the task description.
-    Beast will execute tools, mark the task done/failed, and return a response.
-    Uses a dedicated "heartbeat_auto" session to avoid polluting user sessions.
-    Recurring tasks (repeat_seconds) get rescheduled instead of marked done.
+    Beast executes tools and returns a response. This function then marks
+    one-shots done (do not rely on the model calling add_task). Recurring
+    tasks (cron / repeat_seconds) are rescheduled via _reset_recurring_task().
+    Uses a dedicated heartbeat_task_<id> session so user chats stay clean.
     """
     task_id = task.get("id", "?")
     description = task.get("description", "No description")

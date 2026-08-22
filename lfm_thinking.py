@@ -93,6 +93,20 @@ import json
 import uuid
 import re
 
+from local_harness import (
+    DEFAULT_MAX_TOKENS,
+    parse_tool_calls,
+    clean_tool_calls_from_text,
+    split_thinking,
+    format_tools_for_prompt,
+    to_chat_dicts,
+    extract_image_from_messages,
+    flatten_as_user_text,
+    render_chat,
+    merge_template_kwargs,
+    sampling_for_model,
+)
+
 # Hide tkinter root window
 tk.Tk().withdraw()
 
@@ -368,19 +382,22 @@ def run_server_mode(model, tokenizer, processor, model_name, model_type, host="0
     
     # Request/Response models matching OpenAI format
     class ChatMessage(BaseModel):
+        model_config = {"extra": "allow"}
         role: str
         content: Union[str, List, None] = None
         tool_calls: Optional[List[dict]] = None
-        reasoning_content: Optional[str] = None  # Qwen <think> extracted from visible text
+        tool_call_id: Optional[str] = None
+        name: Optional[str] = None
+        reasoning_content: Optional[str] = None  # <think> extracted from visible text
     
     class ChatCompletionRequest(BaseModel):
         model: str = "auto"
         messages: List[ChatMessage]
         temperature: Optional[float] = 0.7
-        max_tokens: Optional[int] = 512
+        max_tokens: Optional[int] = None  # default DEFAULT_MAX_TOKENS (LFM_MAX_TOKENS)
         stream: Optional[bool] = False
         tools: Optional[List[dict]] = None  # Tool definitions for function calling
-        chat_template_kwargs: Optional[dict] = None  # Qwen3.8 enable_thinking / preserve_thinking / reasoning_effort
+        chat_template_kwargs: Optional[dict] = None  # family extras; unknown keys dropped
     
     class ChatCompletionChoice(BaseModel):
         index: int
@@ -411,228 +428,19 @@ def run_server_mode(model, tokenizer, processor, model_name, model_type, host="0
         data: List[ModelInfo]
     
     # ----------------------------------------------------------------
-    # Tool Calling Support
+    # Tool Calling Support — parse/clean live in local_harness.py
+    # Prefer native chat-template roles + tools=; flatten only if no template.
     # ----------------------------------------------------------------
-    # -------------------------------------------------------------------------
-    # Tool Calling Support for Local LLMs
-    # -------------------------------------------------------------------------
-    # Local models don't have native function calling like Claude/OpenAI.
-    # Instead, we inject tool info into the prompt and parse tool calls from
-    # the model's text output using regex patterns.
-    #
-    # Supported formats:
-    #   1. ```tool_call\n{"name": "...", "arguments": {...}}\n```
-    #   2. <tool_call>{"name": "...", "arguments": {...}}</tool_call>
-    #
-    # TODO: When MLX-LM adds native tool support, this can be simplified.
-    # -------------------------------------------------------------------------
-    
-    def format_tools_for_prompt(tools):
-        """Short format reminder. The OpenAI tools array is the catalog."""
-        if not tools:
-            return ""
-        return "\n".join([
-            "## Tools",
-            "Call tools with JSON:",
-            "```tool_call",
-            '{"name": "tool_name", "arguments": {"param": "value"}}',
-            "```",
-            "Or Qwen native: <tool_call>{\"name\": \"...\", \"arguments\": {...}}</tool_call>",
-            "",
-            "RULES:",
-            "- Answer in text unless you need to act.",
-            "- You may call several independent tools in one turn.",
-            "- For Python use run_python. For HTML use run_html. For images use generate_art.",
-            "- Never retry a tool call that already succeeded. When the task is done, answer in text.",
-        ])
+    def apply_text_chat_template(messages, request=None, tools=None):
+        """apply_chat_template with family kwargs and optional tools=."""
+        extra = merge_template_kwargs(
+            state["model_name"],
+            getattr(request, "chat_template_kwargs", None) if request else None,
+        )
+        return render_chat(
+            state["tokenizer"], messages, tools=tools, extra_kwargs=extra,
+        )
 
-    def parse_tool_calls(text):
-        """
-        Parse tool calls from model output using brace-depth matching
-        with JSON repair for common model output issues.
-
-        Models often produce invalid JSON in tool calls:
-        - Actual newlines inside strings (should be \\n)
-        - Unescaped control characters
-        We handle these with a repair step after extraction.
-        """
-        if text is None:
-            return []
-        if not isinstance(text, str):
-            text = str(text)
-        tool_calls = []
-
-        def _extract_json(s, start=0):
-            """Extract the first balanced {...} from s at/after 'start'."""
-            idx = s.find('{', start)
-            if idx < 0:
-                return None, -1
-            depth = 0
-            in_str = False
-            escape = False
-            for i in range(idx, len(s)):
-                c = s[i]
-                if escape:
-                    escape = False
-                    continue
-                if c == '\\':
-                    escape = True
-                    continue
-                if c == '"' and not escape:
-                    in_str = not in_str
-                    continue
-                if in_str:
-                    continue
-                if c == '{':
-                    depth += 1
-                elif c == '}':
-                    depth -= 1
-                    if depth == 0:
-                        return s[idx:i + 1], i + 1
-            return None, -1
-
-        def _repair_json(blob):
-            """Fix common JSON issues from model output:
-            - Replace actual newlines/tabs/returns inside strings with escape sequences
-            - This makes invalid model JSON parseable by json.loads()
-            """
-            result = []
-            in_str = False
-            escape = False
-            for c in blob:
-                if escape:
-                    result.append(c)
-                    escape = False
-                    continue
-                if c == '\\':
-                    result.append(c)
-                    escape = True
-                    continue
-                if c == '"':
-                    in_str = not in_str
-                    result.append(c)
-                    continue
-                if in_str:
-                    if c == '\n':
-                        result.append('\\n')
-                        continue
-                    if c == '\r':
-                        result.append('\\r')
-                        continue
-                    if c == '\t':
-                        result.append('\\t')
-                        continue
-                result.append(c)
-            return ''.join(result)
-
-        def try_add(data):
-            """Add tool call if it has a name and isn't a duplicate."""
-            name = data.get("name")
-            if not name:
-                return
-            args = data.get("arguments", data.get("args", {}))
-            if isinstance(args, str):
-                try:
-                    args = json.loads(args)
-                except:
-                    args = {}
-            args_str = json.dumps(args)
-            key = f"{name}:{args_str}"
-            if key not in seen:
-                seen.add(key)
-                tool_calls.append({
-                    "id": f"call_{uuid.uuid4().hex[:8]}",
-                    "type": "function",
-                    "function": {"name": name, "arguments": args_str}
-                })
-
-        seen = set()
-
-        def _try_parse(blob, label=""):
-            """Try json.loads, then repair + retry. Returns parsed data or None."""
-            if not blob:
-                return None
-            try:
-                return json.loads(blob)
-            except json.JSONDecodeError as e:
-                _dbg(f"[DEBUG] {label} json.loads failed: {e}")
-                # Repair: fix newlines/tabs inside strings
-                repaired = _repair_json(blob)
-                try:
-                    data = json.loads(repaired)
-                    _dbg(f"[DEBUG] {label} json.loads succeeded after repair")
-                    return data
-                except json.JSONDecodeError as e2:
-                    _dbg(f"[DEBUG] {label} json.loads STILL failed after repair: {e2}")
-                    _dbg(f"[DEBUG] {label} blob[:200] = {blob[:200]}")
-                    return None
-
-        # Pattern A: ```tool_call or ```tool fenced blocks
-        for m in re.finditer(r'```tool(?:_call)?\s*\n', text):
-            blob, _ = _extract_json(text, m.end())
-            _dbg(f"[DEBUG] Pattern A: fence at {m.start()}, blob={'found '+str(len(blob))+' chars' if blob else 'None'}")
-            data = _try_parse(blob, "Pattern A")
-            if data and "name" in data:
-                try_add(data)
-
-        # Pattern B: <tool_call>{...}</tool_call> (Qwen3)
-        if not tool_calls:
-            for m in re.finditer(r'<tool_call>\s*', text):
-                blob, _ = _extract_json(text, m.end())
-                data = _try_parse(blob, "Pattern B")
-                if data and "name" in data:
-                    try_add(data)
-
-        # Pattern C: Raw JSON with "name" key (last resort)
-        if not tool_calls:
-            blob, _ = _extract_json(text)
-            if blob and '"name"' in blob:
-                data = _try_parse(blob, "Pattern C")
-                if data and "name" in data:
-                    try_add(data)
-
-        # Return all parsed calls — Beast executes them sequentially and has loop detection.
-        return tool_calls
-
-    def clean_tool_calls_from_text(text):
-        """Remove tool call blocks and thinking tags from text."""
-        if text is None:
-            return ""
-        if not isinstance(text, str):
-            text = str(text)
-        # Remove ```tool_call blocks
-        text = re.sub(r'```tool_call\s*\n[\s\S]*?\n```', '', text)
-        # Remove ```tool blocks (GLM Flash variant)
-        text = re.sub(r'```tool\s*\n[\s\S]*?\n```', '', text)
-        # Remove <tool_call> blocks
-        text = re.sub(r'<tool_call>[\s\S]*?</tool_call>', '', text)
-        # Remove <think> blocks (Qwen thinking)
-        text = re.sub(r'<think>[\s\S]*?</think>', '', text)
-        return text.strip()
-
-    def split_thinking(text):
-        """Pull Qwen <think> out of the model output. Visible text is what the user sees."""
-        if not text:
-            return "", ""
-        m = re.search(r'<think>([\s\S]*?)</think>', text)
-        if not m:
-            return text, ""
-        visible = (text[:m.start()] + text[m.end():]).strip()
-        return visible, m.group(1).strip()
-
-    def apply_text_chat_template(messages, request=None):
-        """apply_chat_template, forwarding Qwen3.8 kwargs when the tokenizer accepts them."""
-        tok = state["tokenizer"]
-        if tok.chat_template is None:
-            return None
-        base = dict(add_generation_prompt=True, return_dict=False, tokenize=False)
-        extra = {}
-        if request is not None and getattr(request, "chat_template_kwargs", None):
-            extra = dict(request.chat_template_kwargs)
-        try:
-            return tok.apply_chat_template(messages, **base, **extra)
-        except TypeError:
-            return tok.apply_chat_template(messages, **base)
 
     @app.get("/")
     async def root():
@@ -721,28 +529,16 @@ def run_server_mode(model, tokenizer, processor, model_name, model_type, host="0
     # ----------------------------------------------------------------
     # Streaming generator for SSE (Server-Sent Events)
     # ----------------------------------------------------------------
-    async def stream_mlx_text(user_message: str, max_tokens: int) -> AsyncGenerator[str, None]:
-        """Stream tokens from MLX text model using mlx_lm.stream_generate."""
+    async def stream_mlx_text(prompt: str, max_tokens: int, sampler=None) -> AsyncGenerator[str, None]:
+        """Stream tokens from MLX text model using mlx_lm.stream_generate. prompt is already templated."""
         from mlx_lm import stream_generate
 
         chat_id = f"chatcmpl-{uuid.uuid4().hex[:8]}"
         created = int(time.time())
 
-        # Prepare prompt with chat template
-        messages = [{"role": "user", "content": user_message}]
-        if state["tokenizer"].chat_template is not None:
-            # tokenize=False → str prompt; tokenize=True can return ids/tensors mlx_lm mishandles.
-            prompt = state["tokenizer"].apply_chat_template(
-                messages, add_generation_prompt=True, return_dict=False, tokenize=False,
-            )
-        else:
-            prompt = user_message
-
-        # Model-specific sampling: Gemma 4 needs temp=1.0, top_p=0.95, top_k=64
         stream_kwargs = {"max_tokens": max_tokens}
-        if "gemma" in state["model_name"].lower():
-            from mlx_lm.sample_utils import make_sampler
-            stream_kwargs["sampler"] = make_sampler(1.0, top_p=0.95, top_k=64)
+        if sampler is not None:
+            stream_kwargs["sampler"] = sampler
 
         # Stream tokens using mlx_lm's stream_generate
         for response in stream_generate(
@@ -831,82 +627,38 @@ def run_server_mode(model, tokenizer, processor, model_name, model_type, host="0
         Supports tool calling when tools are provided.
         """
         try:
-            # ---------------------------------------------------------------
-            # Conversation History Handling
-            # ---------------------------------------------------------------
-            # Beast sends multi-turn conversations including:
-            #   - user: Original request
-            #   - assistant: Tool call (if any)
-            #   - tool: Result from tool execution
-            #
-            # We flatten this into a text conversation the model can understand,
-            # since local models don't have native tool result handling.
-            # ---------------------------------------------------------------
-            system_message = ""
-            conversation_parts = []
-            image_path = None  # Extracted from image_url content blocks
-
-            for msg in request.messages:
-                content = msg.content
-                # Handle content as string or list
-                if isinstance(content, list):
-                    text_content = " ".join(
-                        item.get("text", "") if isinstance(item, dict) else str(item)
-                        for item in content
-                        if isinstance(item, dict) and item.get("type") in ["text", "tool_result"]
-                    )
-                    # Extract image from image_url blocks (base64 data URI from Beast)
-                    # Only extract the first image found across all messages
-                    if image_path is None:
-                        for item in content:
-                            if isinstance(item, dict) and item.get("type") == "image_url":
-                                data_url = item.get("image_url", {}).get("url", "")
-                                if data_url.startswith("data:"):
-                                    try:
-                                        import base64, tempfile
-                                        # Parse "data:image/jpeg;base64,/9j/..."
-                                        header, b64data = data_url.split(",", 1)
-                                        img_bytes = base64.b64decode(b64data)
-                                        tmp = tempfile.NamedTemporaryFile(suffix=".jpg", delete=False)
-                                        tmp.write(img_bytes)
-                                        tmp.close()
-                                        image_path = tmp.name
-                                        print(f"[DEBUG] Extracted image to {image_path} ({len(img_bytes)} bytes)")
-                                    except Exception as img_err:
-                                        print(f"[DEBUG] Image extraction failed: {img_err}")
-                                    break  # One image is enough
-                else:
-                    text_content = content or ""
-
-                if msg.role == "system":
-                    system_message = text_content
-                elif msg.role == "user":
-                    conversation_parts.append(f"User: {text_content}")
-                elif msg.role == "assistant":
-                    if text_content:
-                        conversation_parts.append(f"Assistant: {text_content}")
-                elif msg.role == "tool":
-                    # Tool results - format clearly for the model
-                    conversation_parts.append(f"[Tool Result]: {text_content}")
-            
-            # Build the user message from conversation (last few turns)
-            user_message = "\n".join(conversation_parts[-6:]) if conversation_parts else ""
-            
-            # If there's a tool result, add instruction to summarize
-            if "[Tool Result]:" in user_message:
-                user_message += "\n\nNow summarize this result for the user in a helpful way."
-            
-            if not user_message:
+            # Native roles for apply_chat_template. Flatten only if the tokenizer
+            # has no template (or for vision, whose MLX helper still wants a string).
+            chat_dicts = to_chat_dicts(request.messages)
+            image_path = extract_image_from_messages(request.messages)
+            if not any((d.get("content") or d.get("tool_calls")) for d in chat_dicts):
                 raise HTTPException(status_code=400, detail="No user message found")
-            
-            # Add tool definitions to the prompt if provided
-            tools_prompt = format_tools_for_prompt(request.tools) if request.tools else ""
+
+            max_tokens = request.max_tokens or DEFAULT_MAX_TOKENS
+            samp = sampling_for_model(state["model_name"], request.temperature)
             _dbg(f"[DEBUG] Tools received: {len(request.tools) if request.tools else 0}")
-            if tools_prompt:
-                _dbg(f"[DEBUG] Tools prompt ({len(tools_prompt)} chars):\n{tools_prompt[:500]}")
-                user_message = user_message + "\n\n" + tools_prompt
-            
-            max_tokens = request.max_tokens or 512
+
+            prompt = apply_text_chat_template(chat_dicts, request, tools=request.tools)
+            user_message, system_message = flatten_as_user_text(chat_dicts)
+            if prompt is None:
+                # No chat template — flatten (full history, no "summarize after tool").
+                if request.tools:
+                    reminder = format_tools_for_prompt(request.tools)
+                    if reminder:
+                        user_message = user_message + "\n\n" + reminder
+                prompt = (system_message + "\n\n" if system_message else "") + user_message
+
+            def _mlx_sampler():
+                from mlx_lm.sample_utils import make_sampler
+                if samp.get("top_p") is not None:
+                    return make_sampler(
+                        samp["temperature"],
+                        top_p=samp.get("top_p", 0.95),
+                        top_k=samp.get("top_k", 64),
+                    )
+                if request.temperature is not None or samp.get("temperature") != 0.7:
+                    return make_sampler(samp["temperature"])
+                return None
 
             # ----------------------------------------------------------------
             # STREAMING MODE
@@ -914,7 +666,7 @@ def run_server_mode(model, tokenizer, processor, model_name, model_type, host="0
             if request.stream:
                 if IS_MACOS and MLX_LM_AVAILABLE and state["model_type"] == "text":
                     return StreamingResponse(
-                        stream_mlx_text(user_message, max_tokens),
+                        stream_mlx_text(prompt, max_tokens, sampler=_mlx_sampler()),
                         media_type="text/event-stream"
                     )
                 elif IS_MACOS and MLX_VLM_AVAILABLE and state["model_type"] == "vision":
@@ -931,29 +683,10 @@ def run_server_mode(model, tokenizer, processor, model_name, model_type, host="0
             # ----------------------------------------------------------------
             # Generate response based on platform and model type
             if IS_MACOS and MLX_LM_AVAILABLE and state["model_type"] == "text":
-                # MLX text model - include system message if present
-                messages = []
-                if system_message:
-                    messages.append({"role": "system", "content": system_message})
-                messages.append({"role": "user", "content": user_message})
-
-                prompt = apply_text_chat_template(messages, request)
-                if prompt is None:
-                    prompt = (system_message + "\n\n" if system_message else "") + user_message
-
-                # Model-specific generation defaults
                 gen_kwargs = {"max_tokens": max_tokens, "verbose": False}
-                is_gemma = "gemma" in state["model_name"].lower()
-                if is_gemma:
-                    # Gemma 4 recommended: temperature=1.0, top_p=0.95, top_k=64
-                    from mlx_lm.sample_utils import make_sampler
-                    _temp = request.temperature if request.temperature is not None else 1.0
-                    gen_kwargs["sampler"] = make_sampler(_temp, top_p=0.95, top_k=64)
-                    print(f"[Gemma] Using temp={_temp}, top_p=0.95, top_k=64")
-                else:
-                    if request.temperature is not None:
-                        from mlx_lm.sample_utils import make_sampler
-                        gen_kwargs["sampler"] = make_sampler(request.temperature)
+                sampler = _mlx_sampler()
+                if sampler is not None:
+                    gen_kwargs["sampler"] = sampler
 
                 response_text = lm_generate(
                     state["model"], state["tokenizer"], prompt=prompt,
@@ -961,7 +694,7 @@ def run_server_mode(model, tokenizer, processor, model_name, model_type, host="0
                 )
 
             elif IS_MACOS and MLX_VLM_AVAILABLE and state["model_type"] == "vision":
-                # MLX vision model — with or without image
+                # MLX vision model — string prompt (mlx_vlm helper is not role-native yet)
                 num_images = 1 if image_path else 0
                 formatted_prompt = apply_chat_template(
                     state["processor"], state["model"].config, user_message, num_images=num_images
@@ -980,14 +713,23 @@ def run_server_mode(model, tokenizer, processor, model_name, model_type, host="0
                         pass
 
             else:
-                # Transformers (Linux)
-                messages = [{"role": "user", "content": user_message}]
-                inputs = state["tokenizer"].apply_chat_template(
-                    messages,
-                    add_generation_prompt=True,
-                    return_tensors="pt",
-                    tokenize=True,
+                # Transformers (Linux) — native messages when the template exists
+                extra = merge_template_kwargs(
+                    state["model_name"], getattr(request, "chat_template_kwargs", None)
                 )
+                inputs = render_chat(
+                    state["tokenizer"], chat_dicts, tools=request.tools,
+                    extra_kwargs=extra, tokenize=True, return_tensors="pt",
+                )
+                if inputs is None:
+                    fallback = [{"role": "system", "content": system_message}] if system_message else []
+                    fallback.append({"role": "user", "content": user_message})
+                    inputs = state["tokenizer"].apply_chat_template(
+                        fallback,
+                        add_generation_prompt=True,
+                        return_tensors="pt",
+                        tokenize=True,
+                    )
                 input_ids = inputs["input_ids"].to(state["model"].device)
                 attention_mask = inputs["attention_mask"].to(state["model"].device)
 
@@ -995,7 +737,7 @@ def run_server_mode(model, tokenizer, processor, model_name, model_type, host="0
                     input_ids=input_ids,
                     attention_mask=attention_mask,
                     do_sample=True,
-                    temperature=request.temperature or 0.7,
+                    temperature=samp["temperature"],
                     max_new_tokens=max_tokens,
                 )
                 response_text = state["tokenizer"].decode(output[0][input_ids.shape[-1]:], skip_special_tokens=True)
@@ -1023,6 +765,7 @@ def run_server_mode(model, tokenizer, processor, model_name, model_type, host="0
             if tool_calls:
                 msg_out["tool_calls"] = tool_calls
                 finish = "tool_calls"
+            prompt_words = len((prompt or user_message or "").split())
             return {
                 "id": f"chatcmpl-{uuid.uuid4().hex[:8]}",
                 "object": "chat.completion",
@@ -1034,9 +777,9 @@ def run_server_mode(model, tokenizer, processor, model_name, model_type, host="0
                     "finish_reason": finish
                 }],
                 "usage": {
-                    "prompt_tokens": len(user_message.split()),
+                    "prompt_tokens": prompt_words,
                     "completion_tokens": len((response_text or "").split()),
-                    "total_tokens": len(user_message.split()) + len((response_text or "").split())
+                    "total_tokens": prompt_words + len((response_text or "").split())
                 }
             }
             

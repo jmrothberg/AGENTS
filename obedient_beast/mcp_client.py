@@ -36,7 +36,7 @@ Tier labels:
 Each server in mcp_servers.json has a "tier" field (essential/extended/cloud).
 These are organizational labels. All tiers are loaded regardless of backend —
 local LLMs need access to cloud MCP servers (e.g., brave-search for web queries).
-The LITE/FULL distinction only affects tool-calling behavior, not MCP loading.
+The LITE/FULL (local/cloud) distinction only affects default depth and heartbeat timing, not which MCP servers load.
 """
 
 import os
@@ -219,7 +219,7 @@ class MCPClient:
         # Discover available tools from this server
         self._discover_tools(name)
 
-    def _send_request(self, server_name: str, method: str, params: dict = None) -> dict:
+    def _send_request(self, server_name: str, method: str, params: dict = None, timeout: float = None) -> dict:
         """
         Send a JSON-RPC 2.0 request to an MCP server and wait for response.
         Each request gets an auto-incrementing ID for matching responses.
@@ -243,8 +243,9 @@ class MCPClient:
 
         # Wait for the matching response from the reader thread (with timeout).
         # MCP servers may send notifications (no "id" field) — skip those.
-        # We match on request_id to ensure we get the right response.
-        timeout = 60  # 60s to allow first-run compilation (e.g., Swift bridge)
+        # Handshake uses MCP_RPC_TIMEOUT (default 20s) so a hung npx cannot block forever.
+        if timeout is None:
+            timeout = float(os.getenv("MCP_RPC_TIMEOUT", "20"))
         import time
         deadline = time.time() + timeout
         while True:
@@ -355,7 +356,7 @@ class MCPClient:
         response = self._send_request(server_name, "tools/call", {
             "name": tool_name,
             "arguments": arguments
-        })
+        }, timeout=60)
 
         result = response.get("result", {})
 

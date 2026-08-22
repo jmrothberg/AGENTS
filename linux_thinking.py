@@ -54,6 +54,20 @@ from datetime import datetime
 import cv2
 from PIL import Image
 
+from local_harness import (
+    DEFAULT_MAX_TOKENS,
+    parse_tool_calls,
+    clean_tool_calls_from_text,
+    split_thinking,
+    format_tools_for_prompt,
+    to_chat_dicts,
+    extract_image_from_messages,
+    flatten_as_user_text,
+    render_chat,
+    merge_template_kwargs,
+    sampling_for_model,
+)
+
 # Hide tkinter root for file dialogs (interactive VL mode).
 tk.Tk().withdraw()
 
@@ -367,178 +381,8 @@ def clear_model_memory():
 
 
 # ============================================================================
-# Tool Calling Support for Local LLMs
+# Tool calling — parse/clean live in local_harness.py (shared with lfm_thinking.py)
 # ============================================================================
-# Local models don't have native function calling like Claude/OpenAI.
-# Instead, we inject tool info into the prompt and parse tool calls from
-# the model's text output using regex patterns.
-#
-# Supported formats:
-#   1. ```tool_call\n{"name": "...", "arguments": {...}}\n```
-#   2. ```tool\n{"name": "...", "arguments": {...}}\n```
-#   3. <tool_call>{"name": "...", "arguments": {...}}</tool_call>
-# ============================================================================
-
-def format_tools_for_prompt(tools):
-    """Short format reminder. The OpenAI tools array is the catalog."""
-    if not tools:
-        return ""
-    return "\n".join([
-        "## Tools",
-        "Call tools with JSON:",
-        "```tool_call",
-        '{"name": "tool_name", "arguments": {"param": "value"}}',
-        "```",
-        "Or Qwen native: <tool_call>{\"name\": \"...\", \"arguments\": {...}}</tool_call>",
-        "",
-        "RULES:",
-        "- Answer in text unless you need to act.",
-        "- You may call several independent tools in one turn.",
-        "- For Python use run_python. For HTML use run_html. For images use generate_art.",
-        "- Never retry a tool call that already succeeded. When the task is done, answer in text.",
-    ])
-
-
-def parse_tool_calls(text):
-    """
-    Parse tool calls with JSON repair (aligned with lfm_thinking.py server).
-    """
-    tool_calls = []
-
-    def _extract_json(s, start=0):
-        idx = s.find('{', start)
-        if idx < 0:
-            return None, -1
-        depth = 0
-        in_str = False
-        escape = False
-        for i in range(idx, len(s)):
-            c = s[i]
-            if escape:
-                escape = False
-                continue
-            if c == '\\':
-                escape = True
-                continue
-            if c == '"' and not escape:
-                in_str = not in_str
-                continue
-            if in_str:
-                continue
-            if c == '{':
-                depth += 1
-            elif c == '}':
-                depth -= 1
-                if depth == 0:
-                    return s[idx:i + 1], i + 1
-        return None, -1
-
-    def _repair_json(blob):
-        result = []
-        in_str = False
-        escape = False
-        for c in blob:
-            if escape:
-                result.append(c)
-                escape = False
-                continue
-            if c == '\\':
-                result.append(c)
-                escape = True
-                continue
-            if c == '"':
-                in_str = not in_str
-                result.append(c)
-                continue
-            if in_str:
-                if c == '\n':
-                    result.append('\\n')
-                    continue
-                if c == '\r':
-                    result.append('\\r')
-                    continue
-                if c == '\t':
-                    result.append('\\t')
-                    continue
-            result.append(c)
-        return ''.join(result)
-
-    seen = set()
-
-    def try_add(data):
-        name = data.get("name")
-        if not name:
-            return
-        args = data.get("arguments", data.get("args", {}))
-        if isinstance(args, str):
-            try:
-                args = json.loads(args)
-            except Exception:
-                args = {}
-        args_str = json.dumps(args)
-        key = f"{name}:{args_str}"
-        if key not in seen:
-            seen.add(key)
-            tool_calls.append({
-                "id": f"call_{uuid.uuid4().hex[:8]}",
-                "type": "function",
-                "function": {"name": name, "arguments": args_str}
-            })
-
-    def _try_parse(blob, label=""):
-        if not blob:
-            return None
-        try:
-            return json.loads(blob)
-        except json.JSONDecodeError as e:
-            print(f"[DEBUG] {label} json.loads failed: {e}")
-            repaired = _repair_json(blob)
-            try:
-                data = json.loads(repaired)
-                print(f"[DEBUG] {label} json.loads succeeded after repair")
-                return data
-            except json.JSONDecodeError as e2:
-                print(f"[DEBUG] {label} json.loads STILL failed after repair: {e2}")
-                print(f"[DEBUG] {label} blob[:200] = {blob[:200]}")
-                return None
-
-    for m in re.finditer(r'```tool(?:_call)?\s*\n', text):
-        blob, _ = _extract_json(text, m.end())
-        print(f"[DEBUG] Pattern A: fence at {m.start()}, blob={'found '+str(len(blob))+' chars' if blob else 'None'}")
-        data = _try_parse(blob, "Pattern A")
-        if data and "name" in data:
-            try_add(data)
-
-    if not tool_calls:
-        for m in re.finditer(r'<tool_call>\s*', text):
-            blob, _ = _extract_json(text, m.end())
-            data = _try_parse(blob, "Pattern B")
-            if data and "name" in data:
-                try_add(data)
-
-    if not tool_calls:
-        blob, _ = _extract_json(text)
-        if blob and '"name"' in blob:
-            data = _try_parse(blob, "Pattern C")
-            if data and "name" in data:
-                try_add(data)
-
-    # Return all parsed calls — Beast executes them sequentially and has loop detection.
-    return tool_calls
-
-
-def clean_tool_calls_from_text(text):
-    """Remove tool call blocks and thinking tags from text."""
-    # Remove ```tool_call blocks
-    text = re.sub(r'```tool_call\s*\n[\s\S]*?\n```', '', text)
-    # Remove ```tool blocks (GLM Flash variant)
-    text = re.sub(r'```tool\s*\n[\s\S]*?\n```', '', text)
-    # Remove <tool_call> blocks
-    text = re.sub(r'<tool_call>[\s\S]*?</tool_call>', '', text)
-    # Remove <think> blocks (Qwen thinking)
-    text = re.sub(r'<think>[\s\S]*?</think>', '', text)
-    return text.strip()
-
 
 # ============================================================================
 # Transformers Server Mode - OpenAI-Compatible API
@@ -602,17 +446,22 @@ def run_server_mode(model, tokenizer, processor, model_name, model_type,
 
     # Request/Response models matching OpenAI format
     class ChatMessage(PydanticModel):
+        model_config = {"extra": "allow"}
         role: str
         content: Union[str, List, None] = None
         tool_calls: Optional[List[dict]] = None
+        tool_call_id: Optional[str] = None
+        name: Optional[str] = None
+        reasoning_content: Optional[str] = None
 
     class ChatCompletionRequest(PydanticModel):
         model: str = model_name
         messages: List[ChatMessage]
         temperature: Optional[float] = 0.7
-        max_tokens: Optional[int] = 512
+        max_tokens: Optional[int] = None  # default DEFAULT_MAX_TOKENS
         stream: Optional[bool] = False
         tools: Optional[List[dict]] = None  # Tool definitions for function calling
+        chat_template_kwargs: Optional[dict] = None
 
     class ChatCompletionChoice(PydanticModel):
         index: int
@@ -646,115 +495,61 @@ def run_server_mode(model, tokenizer, processor, model_name, model_type,
         model: str  # "latest", menu number, or name substring
 
     # ----------------------------------------------------------------
-    # Helper: Build user_message from Beast's multi-turn conversation
+    # Flatten only for vision / no-template fallback (full history, no summarize).
+    # Text models use native chat_dicts + apply_chat_template in generate_text_response.
     # ----------------------------------------------------------------
     def build_user_message(messages, tools=None):
-        """
-        Flatten Beast's multi-turn conversation into a user_message string.
-
-        Beast sends multi-turn conversations including:
-          - user: Original request
-          - assistant: Tool call (if any)
-          - tool: Result from tool execution
-
-        We flatten this into a text conversation the model can understand,
-        since local models don't have native tool result handling.
-        """
-        system_message = ""
-        conversation_parts = []
-        image_path = None  # Extracted from image_url content blocks
-
-        for msg in messages:
-            content = msg.content
-            # Handle content as string or list
-            if isinstance(content, list):
-                text_content = " ".join(
-                    item.get("text", "") if isinstance(item, dict) else str(item)
-                    for item in content
-                    if isinstance(item, dict) and item.get("type") in ["text", "tool_result"]
-                )
-                # Extract image from image_url blocks (base64 data URI from Beast)
-                if image_path is None:
-                    for item in content:
-                        if isinstance(item, dict) and item.get("type") == "image_url":
-                            data_url = item.get("image_url", {}).get("url", "")
-                            if data_url.startswith("data:"):
-                                try:
-                                    import base64, tempfile
-                                    header, b64data = data_url.split(",", 1)
-                                    img_bytes = base64.b64decode(b64data)
-                                    tmp = tempfile.NamedTemporaryFile(suffix=".jpg", delete=False)
-                                    tmp.write(img_bytes)
-                                    tmp.close()
-                                    image_path = tmp.name
-                                    print(f"[DEBUG] Extracted image to {image_path} ({len(img_bytes)} bytes)")
-                                except Exception as img_err:
-                                    print(f"[DEBUG] Image extraction failed: {img_err}")
-                                break  # One image is enough
-            else:
-                text_content = content or ""
-
-            if msg.role == "system":
-                system_message = text_content
-            elif msg.role == "user":
-                conversation_parts.append(f"User: {text_content}")
-            elif msg.role == "assistant":
-                if text_content:
-                    conversation_parts.append(f"Assistant: {text_content}")
-            elif msg.role == "tool":
-                # Tool results - format clearly for the model
-                conversation_parts.append(f"[Tool Result]: {text_content}")
-
-        # Build the user message from conversation (last few turns)
-        user_message = "\n".join(conversation_parts[-6:]) if conversation_parts else ""
-
-        # If there's a tool result, add instruction to summarize
-        if "[Tool Result]:" in user_message:
-            user_message += "\n\nNow summarize this result for the user in a helpful way."
-
-        # Add tool definitions to the prompt if provided (lfm_thinking-style)
+        chat_dicts = to_chat_dicts(messages)
+        image_path = extract_image_from_messages(messages)
+        user_message, system_message = flatten_as_user_text(chat_dicts)
         if tools:
-            tools_prompt = format_tools_for_prompt(tools)
-            if tools_prompt:
-                tool_instruction = (
-                    f"\n\n{tools_prompt}\n"
-                    "To use a tool, respond ONLY with: ```tool_call\n"
-                    '{"name": "TOOL_NAME", "arguments": {}}\n```\n'
-                    "Example for web search: ```tool_call\n"
-                    '{"name": "mcp_brave-search_brave_web_search", '
-                    '"arguments": {"query": "intel stock price"}}\n```\n'
-                    "DO NOT explain. Just output the tool_call block."
-                )
-                user_message = user_message + tool_instruction
-
+            reminder = format_tools_for_prompt(tools)
+            if reminder:
+                user_message = user_message + "\n\n" + reminder
         return user_message, system_message, image_path
 
     def _text_generate_kwargs(temperature, max_tokens):
-        """Gemma-friendly sampling (parity with lfm_thinking MLX defaults)."""
-        kwargs = {"do_sample": True, "max_new_tokens": max_tokens}
-        if "gemma" in state["model_name"].lower():
-            kwargs["temperature"] = temperature if temperature is not None else 1.0
-            kwargs["top_p"] = 0.95
-            kwargs["top_k"] = 64
-        else:
-            kwargs["temperature"] = temperature if temperature is not None else 0.7
+        """Family-preset sampling (gemma / qwen / default)."""
+        samp = sampling_for_model(state["model_name"], temperature)
+        kwargs = {
+            "do_sample": True,
+            "max_new_tokens": max_tokens,
+            "temperature": samp["temperature"],
+        }
+        if samp.get("top_p") is not None:
+            kwargs["top_p"] = samp["top_p"]
+        if samp.get("top_k") is not None:
+            kwargs["top_k"] = samp["top_k"]
         return kwargs
 
-    def generate_text_response(user_message, system_message, temperature, max_tokens):
-        """Causal LM + tokenizer."""
-        import torch
+    def generate_text_response(
+        user_message, system_message, temperature, max_tokens,
+        chat_dicts=None, tools=None, extra_kwargs=None,
+    ):
+        """Causal LM + tokenizer. Prefer native chat_dicts when provided."""
         tok = state["tokenizer"]
         mdl = state["model"]
-        chat_messages = []
-        if system_message:
-            chat_messages.append({"role": "system", "content": system_message})
-        chat_messages.append({"role": "user", "content": user_message})
-        inputs = tok.apply_chat_template(
-            chat_messages,
-            add_generation_prompt=True,
-            return_tensors="pt",
-            tokenize=True,
-        )
+        inputs = None
+        if chat_dicts:
+            inputs = render_chat(
+                tok, chat_dicts, tools=tools, extra_kwargs=extra_kwargs,
+                tokenize=True, return_tensors="pt",
+            )
+        if inputs is None:
+            if tools:
+                reminder = format_tools_for_prompt(tools)
+                if reminder:
+                    user_message = (user_message or "") + "\n\n" + reminder
+            chat_messages = []
+            if system_message:
+                chat_messages.append({"role": "system", "content": system_message})
+            chat_messages.append({"role": "user", "content": user_message})
+            inputs = tok.apply_chat_template(
+                chat_messages,
+                add_generation_prompt=True,
+                return_tensors="pt",
+                tokenize=True,
+            )
         input_ids = inputs["input_ids"].to(mdl.device)
         attention_mask = inputs["attention_mask"].to(mdl.device)
         gkw = _text_generate_kwargs(temperature, max_tokens)
@@ -824,7 +619,10 @@ def run_server_mode(model, tokenizer, processor, model_name, model_type,
             )
         return response_text, prompt_tokens, completion_tokens
 
-    def generate_response(user_message, system_message, temperature, max_tokens, image_path=None):
+    def generate_response(
+        user_message, system_message, temperature, max_tokens, image_path=None,
+        chat_dicts=None, tools=None, extra_kwargs=None,
+    ):
         """Dispatch text vs vision (lfm_thinking parity for Beast + local API)."""
         if state["model_type"] == "vision" and state.get("processor") is not None:
             return generate_vision_response(
@@ -833,6 +631,7 @@ def run_server_mode(model, tokenizer, processor, model_name, model_type,
             )
         return generate_text_response(
             user_message, system_message, temperature, max_tokens,
+            chat_dicts=chat_dicts, tools=tools, extra_kwargs=extra_kwargs,
         )
 
     # ----------------------------------------------------------------
@@ -958,20 +757,20 @@ def run_server_mode(model, tokenizer, processor, model_name, model_type,
         Supports tool calling when tools are provided.
         """
         try:
+            chat_dicts = to_chat_dicts(request.messages)
             user_message, system_message, image_path = build_user_message(
-                request.messages, request.tools
+                request.messages, tools=None  # native path passes tools= to the template
             )
-
-            if not user_message:
+            # Flatten reminder only when the template cannot take tools=
+            extra = merge_template_kwargs(
+                state["model_name"], getattr(request, "chat_template_kwargs", None)
+            )
+            if not user_message and not chat_dicts:
                 raise HTTPException(status_code=400, detail="No user message found")
 
-            max_tokens = request.max_tokens or 512
-            if request.temperature is not None:
-                temperature = request.temperature
-            elif "gemma" in state["model_name"].lower():
-                temperature = 1.0
-            else:
-                temperature = 0.7
+            max_tokens = request.max_tokens or DEFAULT_MAX_TOKENS
+            samp = sampling_for_model(state["model_name"], request.temperature)
+            temperature = samp["temperature"]
 
             print(f"[DEBUG] Tools received: {len(request.tools) if request.tools else 0}")
 
@@ -1056,22 +855,31 @@ def run_server_mode(model, tokenizer, processor, model_name, model_type,
                     try:
                         tok = state["tokenizer"]
                         mdl = state["model"]
-                        chat_messages = []
-                        if system_message:
-                            chat_messages.append({
-                                "role": "system",
-                                "content": system_message,
-                            })
-                        chat_messages.append({
-                            "role": "user",
-                            "content": user_message,
-                        })
-                        inputs = tok.apply_chat_template(
-                            chat_messages,
-                            add_generation_prompt=True,
-                            return_tensors="pt",
-                            tokenize=True,
+                        extra_kw = merge_template_kwargs(
+                            state["model_name"],
+                            getattr(request, "chat_template_kwargs", None),
                         )
+                        inputs = render_chat(
+                            tok, chat_dicts, tools=request.tools,
+                            extra_kwargs=extra_kw, tokenize=True, return_tensors="pt",
+                        )
+                        if inputs is None:
+                            chat_messages = []
+                            if system_message:
+                                chat_messages.append({
+                                    "role": "system",
+                                    "content": system_message,
+                                })
+                            chat_messages.append({
+                                "role": "user",
+                                "content": user_message,
+                            })
+                            inputs = tok.apply_chat_template(
+                                chat_messages,
+                                add_generation_prompt=True,
+                                return_tensors="pt",
+                                tokenize=True,
+                            )
                         input_ids = inputs["input_ids"].to(mdl.device)
                         attention_mask = inputs["attention_mask"].to(mdl.device)
                         streamer = TextIteratorStreamer(
@@ -1153,13 +961,18 @@ def run_server_mode(model, tokenizer, processor, model_name, model_type,
                             temperature,
                             max_tokens,
                             image_path,
+                            chat_dicts,
+                            request.tools,
+                            extra,
                         ),
                     )
                 )
             finally:
                 _unlink_temp_image()
 
-            response_text = clean_tool_calls_from_text(response_text)
+            raw_text = response_text or ""
+            visible, reasoning = split_thinking(raw_text)
+            response_text = clean_tool_calls_from_text(visible)
 
             print(
                 f"[DEBUG] Full response:\n"
@@ -1168,11 +981,11 @@ def run_server_mode(model, tokenizer, processor, model_name, model_type,
 
             tool_calls = []
             if request.tools:
-                tool_calls = parse_tool_calls(response_text)
+                tool_calls = parse_tool_calls(raw_text)
                 print(f"[DEBUG] Tool calls found: {len(tool_calls)}")
                 if tool_calls:
                     print(f"[DEBUG] Parsed tool: {tool_calls[0]}")
-                    response_text = clean_tool_calls_from_text(response_text)
+                    response_text = clean_tool_calls_from_text(visible)
 
             if tool_calls:
                 return {
@@ -1186,6 +999,7 @@ def run_server_mode(model, tokenizer, processor, model_name, model_type,
                             "role": "assistant",
                             "content": response_text if response_text else None,
                             "tool_calls": tool_calls,
+                            **({"reasoning_content": reasoning} if reasoning else {}),
                         },
                         "finish_reason": "tool_calls",
                     }],

@@ -2,17 +2,22 @@
 
 Personal agent: CLI + WhatsApp, 30 built-in tools, heartbeat tasks, local memory.
 
-**Setup and how to start:** see the [repo-root README](../README.md). Canonical `.env` is the **repo root**. `lfm` = local model (Qwen by default).
+**Setup and how to start:** see the [repo-root README](../README.md). Canonical `.env` is the **repo root**. `lfm` = local model (any weights on `:8000`; default folder `LFM_MODEL`, today Qwen3.8-27B-class).
 
 ```bash
 ./setup.sh          # once
 ./start.sh phone    # 3 windows: brain, mailbox, WhatsApp — no local client
 ./start.sh you      # 4th window only: local client (beast.py, You:) — safe if phone is already up
 ./start.sh cli      # brain + local client, no WhatsApp
+./start.sh          # 5 windows: adds heartbeat + CLI
+./start.sh pm2      # mailbox/WhatsApp/heartbeat in pm2 + brain/CLI terminals
 ./start.sh stop     # stop all
+./start.sh status   # what's running
 ```
 
-**Local client** = `beast.py` (type at `You:`). **Not** `lfm_thinking.py` (brain) and **not** `test_client.py` (raw model ping). Full window map: [repo-root README](../README.md).
+`phone` / `you` force `LFM_URL=http://localhost:8000` and `MCP_ENABLED=false`. `start.sh` starts `lfm_thinking.py` on macOS and `linux_thinking.py` on Linux.
+
+**Local client** = `beast.py` (type at `You:`). **Not** `lfm_thinking.py` (brain) and **not** `test_client.py` (raw model ping). **Not** `local_harness.py` (library only — no extra window). Full map and diagrams: [repo-root README](../README.md).
 
 ## For LLMs (60 seconds)
 
@@ -21,7 +26,8 @@ Personal agent: CLI + WhatsApp, 30 built-in tools, heartbeat tasks, local memory
 - **LLM:** `llm.py` — `claude` | `openai` | `lfm`.
 - **Memory:** `workspace/memory.json` — atomic facts only (BM25 + decay). MCP graph is optional and ephemeral.
 - **Sessions:** `sessions/<id>.jsonl` — CLI `cli_*`, WhatsApp `wa_<phone>`.
-- **Slash commands** are handled in `run()` before the LLM.
+- **Slash commands** are handled in `run()` before the LLM (`/new`, `/quit`, `/image` only in `cli()`).
+- **Local server:** `lfm_thinking.py` / `linux_thinking.py` pass native chat roles into `apply_chat_template` (`local_harness.py`). Flatten only if there is no template.
 
 ## Slash commands
 
@@ -39,10 +45,12 @@ Personal agent: CLI + WhatsApp, 30 built-in tools, heartbeat tasks, local memory
 | `/heartbeat on\|off` | Autopilot |
 | `/boot` `/boot install` | Daily `workspace/BOOT.md` |
 | `/sandbox` `/sandbox log` | Generated code runs |
-| `/skills` | MCP catalog / skill runbooks |
+| `/skills` | MCP server catalog (not markdown runbooks) |
 | `/clear` `/clear tasks` `/clear memory` `/clear all` | Wipe state |
 | `/image [path]` | Attach image (CLI) |
 | `/new` `/quit` | CLI only |
+
+Markdown skills: drop `workspace/skills/<name>/SKILL.md`, then the model uses `list_skills` / `use_skill`. No restart.
 
 ## Processes
 
@@ -52,7 +60,7 @@ After Python changes: restart the processes that import the file. `pm2 restart b
 
 ## Heartbeat
 
-`heartbeat.py` runs pending items in `workspace/tasks.json`. Recurring tasks (`cron` / `repeat_seconds`) reschedule. **One-shots are marked `done` in code** after `run()` returns — the model does not need to call `add_task(status=done)`.
+`heartbeat.py` runs pending items in `workspace/tasks.json`. Recurring tasks (`cron` / `repeat_seconds`) reschedule. **One-shots are marked `done` in code** after `run()` returns — the model does not need to call `add_task(status=done)`. Interval: 5 min cloud, 10 min local.
 
 ## Memory
 
@@ -61,7 +69,7 @@ After Python changes: restart the processes that import the file. `pm2 restart b
 
 ## MCP
 
-Enabled with `MCP_ENABLED=true`. Catalog: `config/mcp_servers.json`. Put `BRAVE_API_KEY` in repo-root `.env`, not in the JSON. Tools are named `mcp_<server>_<tool>`.
+Enabled when `MCP_ENABLED=true`. Defaults **false** if unset. Handshake timeout `MCP_RPC_TIMEOUT` (default 20s). Catalog: `config/mcp_servers.json`. Put `BRAVE_API_KEY` in repo-root `.env`, not in the JSON. Tools are named `mcp_<server>_<tool>`.
 
 ## WhatsApp group control (OWNER)
 
@@ -79,5 +87,5 @@ Open groups persist in `workspace/open_chats.json`. `ALLOWED_NUMBERS` / `ALLOWED
 
 ## Art and sandbox
 
-- `generate_art` — local FLUX on macOS (`../flux_art.py`), auto-sends on WhatsApp.
+- `generate_art` — FLUX.2-klein on macOS (`../flux_art.py`), Z-Image-Turbo on Linux (`../zimage_art_linux.py`). Auto-sends on WhatsApp. PNGs land in repo-root `generated_art/`.
 - `run_python` / `run_html` — `workspace/Generated Code/`. `/sandbox` lists runs.

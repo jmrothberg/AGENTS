@@ -30,9 +30,23 @@ Tool calling differences between backends:
 
 import os
 import json
+import sys
 from dataclasses import dataclass
 from typing import Optional
+from pathlib import Path
 from capabilities import load_beast_env
+
+load_beast_env()
+
+_ROOT = Path(__file__).resolve().parent.parent
+if str(_ROOT) not in sys.path:
+    sys.path.insert(0, str(_ROOT))
+from local_harness import (
+    tools_to_openai,
+    parse_tool_calls as harness_parse_tool_calls,
+    clean_tool_calls_from_text,
+    split_thinking,
+)
 
 load_beast_env()
 
@@ -47,7 +61,8 @@ BACKEND = os.getenv("LLM_BACKEND_TEST") or os.getenv("LLM_BACKEND", "lfm")  # "l
 # This lets you run the model on a different machine (e.g., Linux GPU server).
 LFM_URL = os.getenv("LFM_URL", "http://localhost:8000")
 LFM_URL_LOCAL = "http://localhost:8000"  # Always try local first
-LFM_URL_REMOTE = os.getenv("LFM_URL_REMOTE", "http://192.168.7.57:8000")  # Fallback
+# Empty unless set — do not assume a LAN IP.
+LFM_URL_REMOTE = (os.getenv("LFM_URL_REMOTE") or "").strip()
 
 # Qwen3.8 thinking knobs — ignored by Claude/OpenAI. Defaults suit agents, not max chat.
 def _env_bool(name: str, default: bool) -> bool:
@@ -267,8 +282,6 @@ class LLM:
         """
         import urllib.request
         import urllib.error
-        import re
-        import uuid
 
         # Short reminder only — the OpenAI tools array is the catalog.
         tool_prompt = ""
@@ -293,29 +306,13 @@ class LLM:
         # Also convert tools to OpenAI format for native function calling support.
         # This is the "belt AND suspenders" approach — we send tools both in the
         # prompt text and in the API, covering models with and without native support.
-        openai_tools = None
-        if tools:
-            openai_tools = [
-                {
-                    "type": "function",
-                    "function": {
-                        "name": t["name"],
-                        "description": t["description"],
-                        "parameters": {
-                            "type": "object",
-                            "properties": {k: {"type": "string", "description": v} for k, v in t.get("params", {}).items()},
-                            "required": list(t.get("params", {}).keys())
-                        }
-                    }
-                }
-                for t in tools
-            ]
+        openai_tools = tools_to_openai(tools) if tools else None
 
         payload = {
             "model": "lfm",
             "messages": msgs,
             "max_tokens": LFM_MAX_TOKENS,
-            # Qwen3.8 chat-template knobs (other models ignore unknown fields)
+            # Tokenizer extras (QWEN_* aliases). Other models ignore unknown fields.
             "chat_template_kwargs": {
                 "enable_thinking": QWEN_ENABLE_THINKING,
                 "preserve_thinking": QWEN_PRESERVE_THINKING,
@@ -327,10 +324,12 @@ class LLM:
 
         data = json.dumps(payload).encode('utf-8')
 
-        # URL fallback chain: try local first, then remote
-        urls_to_try = [LFM_URL_LOCAL, LFM_URL_REMOTE]
-        if LFM_URL not in urls_to_try:
-            urls_to_try.insert(0, LFM_URL)  # Custom URL gets highest priority
+        # URL fallback: LFM_URL (if custom) → localhost → LFM_URL_REMOTE (if set)
+        urls_to_try = [LFM_URL_LOCAL]
+        if LFM_URL_REMOTE:
+            urls_to_try.append(LFM_URL_REMOTE)
+        if LFM_URL and LFM_URL not in urls_to_try:
+            urls_to_try.insert(0, LFM_URL)
 
         result = None
         last_error = None
@@ -373,147 +372,23 @@ class LLM:
                     args=json.loads(tc["function"]["arguments"])
                 ))
         else:
-            # Strategy 2: Parse text-based tool calls from model output.
-            # Models output tool calls in various formats:
-            #   ```tool\n{...}\n```          (what we asked for)
-            #   ```tool_call\n{...}\n```     (common variant)
-            #   <tool_call>{...}</tool_call> (Qwen3 native)
-            #   raw JSON with "name" key     (fallback)
-            #
-            # Regex with [^}]+ or .*? CANNOT handle nested braces
-            # (e.g. {"name":"write_file","arguments":{"content":"{...}"}})
-            # so we use brace-depth matching for reliable extraction.
-
-            def _extract_json_brace_match(s: str, start: int = 0) -> str | None:
-                """Extract the first balanced {...} from s starting at position start."""
-                idx = s.find('{', start)
-                if idx < 0:
-                    return None
-                depth = 0
-                in_str = False
-                escape = False
-                for i in range(idx, len(s)):
-                    c = s[i]
-                    if escape:
-                        escape = False
-                        continue
-                    if c == '\\':
-                        escape = True
-                        continue
-                    if c == '"' and not escape:
-                        in_str = not in_str
-                        continue
-                    if in_str:
-                        continue
-                    if c == '{':
-                        depth += 1
-                    elif c == '}':
-                        depth -= 1
-                        if depth == 0:
-                            return s[idx:i + 1]
-                return None
-
-            def _repair_json(blob: str) -> str:
-                """Fix actual newlines/tabs inside JSON strings → escape sequences."""
-                result = []
-                in_str = False
-                escape = False
-                for c in blob:
-                    if escape:
-                        result.append(c)
-                        escape = False
-                        continue
-                    if c == '\\':
-                        result.append(c)
-                        escape = True
-                        continue
-                    if c == '"':
-                        in_str = not in_str
-                        result.append(c)
-                        continue
-                    if in_str:
-                        if c == '\n': result.append('\\n'); continue
-                        if c == '\r': result.append('\\r'); continue
-                        if c == '\t': result.append('\\t'); continue
-                    result.append(c)
-                return ''.join(result)
-
-            def _parse_tool_json(json_str: str) -> ToolCall | None:
-                """Parse a tool call JSON blob into a ToolCall, with repair."""
-                for attempt_str in [json_str, _repair_json(json_str)]:
-                    try:
-                        data = json.loads(attempt_str)
-                        if "name" not in data:
-                            return None
-                        # Models use "args" or "arguments" — accept both
-                        args = data.get("args", data.get("arguments", {}))
-                        if isinstance(args, str):
-                            args = json.loads(args)
-                        return ToolCall(
-                            id=f"call_{uuid.uuid4().hex[:8]}",
-                            name=data["name"],
-                            args=args
-                        )
-                    except (json.JSONDecodeError, TypeError, KeyError):
-                        continue
-                return None
-
-            # Pattern A: Fenced code blocks — ```tool or ```tool_call
-            fence_pattern = r'```tool(?:_call)?\s*\n'
-            for m in re.finditer(fence_pattern, text):
-                blob = _extract_json_brace_match(text, m.end())
-                if blob:
-                    tc = _parse_tool_json(blob)
-                    if tc:
-                        tool_calls.append(tc)
-
-            # Pattern B: <tool_call>{...}</tool_call> (Qwen3)
-            if not tool_calls:
-                for m in re.finditer(r'<tool_call>\s*', text):
-                    blob = _extract_json_brace_match(text, m.end())
-                    if blob:
-                        tc = _parse_tool_json(blob)
-                        if tc:
-                            tool_calls.append(tc)
-
-            # Pattern C: Raw JSON with "name" key (last resort)
-            if not tool_calls:
-                blob = _extract_json_brace_match(text)
-                if blob and '"name"' in blob:
-                    tc = _parse_tool_json(blob)
-                    if tc:
-                        tool_calls.append(tc)
-
-            # Deduplicate: models sometimes emit the same tool call block
-            # multiple times. Keep only the first occurrence of each (name, args).
-            if len(tool_calls) > 1:
-                seen = set()
-                deduped = []
-                for tc in tool_calls:
-                    key = (tc.name, json.dumps(tc.args, sort_keys=True, default=str))
-                    if key not in seen:
-                        seen.add(key)
-                        deduped.append(tc)
-                tool_calls = deduped
-
-            # Clean tool call blocks from the text response so the user
-            # only sees the natural language part, not the raw JSON.
+            # Strategy 2: text tool calls (```tool_call / <tool_call> / raw JSON)
+            for tc in harness_parse_tool_calls(text):
+                try:
+                    args = json.loads(tc["function"]["arguments"])
+                except (json.JSONDecodeError, TypeError, KeyError):
+                    args = {}
+                tool_calls.append(ToolCall(
+                    id=tc["id"],
+                    name=tc["function"]["name"],
+                    args=args,
+                ))
             if tool_calls:
-                text = re.sub(r'```tool(?:_call)?\s*\n[\s\S]*?\n```', '', text)
-                text = re.sub(r'<tool_call>[\s\S]*?</tool_call>', '', text)
-                # Remove any remaining raw JSON that looks like a tool call
-                blob = _extract_json_brace_match(text)
-                if blob and '"name"' in blob:
-                    text = text.replace(blob, '')
-                text = text.strip()
+                text = clean_tool_calls_from_text(text)
 
         # If the server didn't split thinking, pull <think> out of visible text.
         if not reasoning and "<think>" in text:
-            import re as _re
-            m = _re.search(r"<think>([\s\S]*?)</think>", text)
-            if m:
-                reasoning = m.group(1).strip()
-                text = (text[:m.start()] + text[m.end():]).strip()
+            text, reasoning = split_thinking(text)
 
         return LLMResponse(text=text, tool_calls=tool_calls, raw=result, reasoning=reasoning)
 

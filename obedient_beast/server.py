@@ -30,7 +30,7 @@ and includes it in the JSON response so bridge.js can send it via WhatsApp.
 
 Usage:
     python server.py              # Start server on port 5001
-    PORT=8080 python server.py    # Use different port
+    BEAST_PORT=8080 python server.py    # Use different port
 """
 
 import os

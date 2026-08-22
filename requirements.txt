@@ -1,5 +1,5 @@
-# Requirements for LFM-2.5 Inference Script
-# Supports both macOS (MLX) and Ubuntu/Linux (transformers)
+# Requirements for the local model server (lfm_thinking.py / linux_thinking.py)
+# macOS: MLX. Linux: transformers. Beast agent deps: obedient_beast/requirements.txt
 
 # Core dependencies (all platforms)
 pillow>=10.0.0                    # PIL/Pillow for image processing
