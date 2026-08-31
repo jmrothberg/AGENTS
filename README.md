@@ -123,6 +123,10 @@ Default local weights are **`LFM_MODEL`** (today: `Qwen3.8-27B-mxfp8` under `/Us
 python lfm_thinking.py --model Qwen3.8-27B-mxfp8 --server   # macOS brain on :8000
 python linux_thinking.py --model latest --server            # Linux twin, same API
 python test_client.py --eval-parse                          # harness parser tests
+
+# Flash-Next (qwen4_exp 4-bit). Does not change LFM_MODEL / start.sh default.
+source /Users/jonathanrothberg/Agents/.venv/bin/activate
+python /Users/jonathanrothberg/Agents/lfm_thinking.py --model Qwen3.8-Flash-Next-MLX-4bit --server
 ```
 
 ---
