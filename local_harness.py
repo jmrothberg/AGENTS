@@ -23,6 +23,20 @@ DEFAULT_MAX_TOKENS = int(os.getenv("LFM_MAX_TOKENS", "16384"))
 # ---------------------------------------------------------------------------
 FAMILY_PRESETS = [
     {
+        # qwen4_exp (Flash-Next). Must be before the generic qwen3.8 match.
+        # Sampling from this checkpoint's generation_config.json.
+        "match": ("flash-next", "qwen4_exp", "qwen4-exp"),
+        "chat_template_kwargs": {
+            "enable_thinking": True,
+            "preserve_thinking": True,
+            "reasoning_effort": "medium",
+        },
+        "reasoning_effort_values": ("low", "medium", "xhigh"),
+        "temperature": 1.0,
+        "top_p": 0.95,
+        "top_k": 20,
+    },
+    {
         "match": ("qwen3.8", "qwen3_8", "qwen-3.8"),
         "chat_template_kwargs": {
             "enable_thinking": True,
@@ -408,7 +422,7 @@ def _repair_json(blob: str) -> str:
 
 
 def parse_tool_calls(text) -> list:
-    """Brace-depth parse of ```tool_call, <tool_call>, or raw JSON. OpenAI-style dicts."""
+    """Brace-depth parse of ```tool_call, JSON <tool_call>, Qwen XML <function=>, or raw JSON."""
     if text is None:
         return []
     if not isinstance(text, str):
@@ -459,6 +473,26 @@ def parse_tool_calls(text) -> list:
             data = try_parse(blob)
             if data and "name" in data:
                 try_add(data)
+
+    # Qwen3.8 Flash-Next / qwen4_exp chat template: XML, not JSON.
+    # <tool_call><function=get_weather><parameter=location>\nMiami\n</parameter></function></tool_call>
+    for m in re.finditer(
+        r"<tool_call>\s*<function=([^>\s]+)\s*>([\s\S]*?)</function>\s*</tool_call>",
+        text,
+        flags=re.IGNORECASE,
+    ):
+        args = {}
+        for pm in re.finditer(
+            r"<parameter=([^>\s]+)\s*>([\s\S]*?)</parameter>",
+            m.group(2),
+            flags=re.IGNORECASE,
+        ):
+            raw = pm.group(2).strip()
+            try:
+                args[pm.group(1).strip()] = json.loads(raw)
+            except Exception:
+                args[pm.group(1).strip()] = raw
+        try_add({"name": m.group(1).strip(), "arguments": args})
 
     if not tool_calls:
         blob, _ = _extract_json(text)

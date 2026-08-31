@@ -181,11 +181,12 @@ def eval_parse_offline():
         ("fence", '```tool_call\n{"name": "shell", "arguments": {"command": "echo hi"}}\n```'),
         ("qwen", '<tool_call>{"name": "read_file", "arguments": {"path": "/tmp/x"}}</tool_call>'),
         ("nested", '```tool_call\n{"name": "write_file", "arguments": {"path": "a", "content": "{ok}"}}\n```'),
+        ("qwen_xml", "<tool_call>\n<function=get_weather>\n<parameter=location>\nMiami\n</parameter>\n</function>\n</tool_call>"),
     ]
     ok = True
     for label, text in cases:
         parsed = parse_tool_calls(text)
-        if not parsed or parsed[0]["function"]["name"] not in ("shell", "read_file", "write_file"):
+        if not parsed or parsed[0]["function"]["name"] not in ("shell", "read_file", "write_file", "get_weather"):
             print(f"  ❌ {label}: {parsed}")
             ok = False
         else:

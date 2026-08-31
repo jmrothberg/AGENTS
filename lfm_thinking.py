@@ -208,9 +208,11 @@ def scan_mlx_models(models_dir):
                     # Vision models: "vl", "vision", "image" in model_type
                     if any(x in mt for x in ["vl", "vision", "image"]):
                         model_type = "vision"
-                    # Newer multimodal models (Qwen3.5, etc.) have vision token IDs
+                    # Newer multimodal models (Qwen3.5, qwen4_exp, etc.) have vision token IDs
                     # or vision_config even without "vl" in model_type
                     if any(k in config for k in ["image_token_id", "vision_start_token_id", "vision_config"]):
+                        model_type = "vision"
+                    if mt in ("qwen4_exp", "qwen4-exp"):
                         model_type = "vision"
             except:
                 pass
@@ -247,6 +249,41 @@ def refresh_mlx_models():
     """Re-scan MLX_Models on disk. Import-time cache goes stale if folders are moved/deleted."""
     global MLX_MODELS
     MLX_MODELS = scan_mlx_models(MLX_MODELS_DIR)
+
+
+def _canonicalize_qwen4_exp_rmsnorm(model):
+    """Vontra Flash-Next MLX stores Qwen4ExpRMSNorm as ones-centered gamma (~1.0).
+
+    mlx-vlm applies y*(1+w) assuming zero-centered weights. On Vontra that
+    doubles every norm and the model emits junk tokens (oMLX issue #3181).
+    Subtract 1 from Qwen4ExpRMSNorm weights when we detect that dialect.
+    Leave Qwen4ExpRMSNormGated alone (already ones-centered, uses weight directly).
+    """
+    try:
+        from mlx_vlm.models.qwen4_exp.language import Qwen4ExpRMSNorm
+        import mlx.core as mx
+    except ImportError:
+        return
+    named = getattr(model, "named_modules", None)
+    if named is None:
+        return
+    norms = [mod for _n, mod in named() if isinstance(mod, Qwen4ExpRMSNorm)]
+    if not norms:
+        return
+    try:
+        mean = float(mx.mean(norms[0].weight.astype(mx.float32)).item())
+    except Exception:
+        return
+    if mean < 0.5:
+        return
+    for mod in norms:
+        mod.weight = mod.weight.astype(mx.float32) - 1.0
+    mx.eval(*[m.weight for m in norms])
+    print(
+        f"[lfm] qwen4_exp RMSNorm: ones-centered checkpoint (mean={mean:.3f}); "
+        f"subtracted 1 from {len(norms)} norms",
+        flush=True,
+    )
 
 
 # Scan models dynamically at startup
@@ -508,6 +545,7 @@ def run_server_mode(model, tokenizer, processor, model_name, model_type, host="0
         if use_vl and MLX_VLM_AVAILABLE:
             print(f"Loading {new_desc} (MLX Vision)...")
             new_model, new_processor = vlm_load(new_path)
+            _canonicalize_qwen4_exp_rmsnorm(new_model)
             state["model"] = new_model
             state["processor"] = new_processor
             state["tokenizer"] = None
@@ -579,23 +617,55 @@ def run_server_mode(model, tokenizer, processor, model_name, model_type, host="0
         yield f"data: {json.dumps(final_chunk)}\n\n"
         yield "data: [DONE]\n\n"
 
-    async def stream_mlx_vision(user_message: str, max_tokens: int, image_path: str = None) -> AsyncGenerator[str, None]:
+    def _vlm_chat_generate(chat_dicts, max_tokens, image_path, request, samp):
+        """mlx-vlm path for qwen4_exp / VLMs: native roles + family sampling.
+
+        The old path flattened to "User: ..." and called generate at temperature 0,
+        which makes Flash-Next emit a single junk token.
+        """
+        extra = merge_template_kwargs(
+            state["model_name"], getattr(request, "chat_template_kwargs", None)
+        )
+        template_kw = {}
+        if "enable_thinking" in extra:
+            template_kw["enable_thinking"] = extra["enable_thinking"]
+        if "reasoning_effort" in extra:
+            template_kw["reasoning_effort"] = extra["reasoning_effort"]
+        if request.tools:
+            template_kw["tools"] = request.tools
+        formatted_prompt = apply_chat_template(
+            state["processor"],
+            state["model"].config,
+            chat_dicts,
+            num_images=1 if image_path else 0,
+            **template_kw,
+        )
+        gen_kwargs = {
+            "max_tokens": max_tokens,
+            "verbose": False,
+            "temperature": samp.get("temperature", 0.7),
+        }
+        if samp.get("top_p") is not None:
+            gen_kwargs["top_p"] = samp["top_p"]
+        if samp.get("top_k") is not None:
+            gen_kwargs["top_k"] = samp["top_k"]
+        result = vlm_generate(
+            state["model"], state["processor"], formatted_prompt,
+            image=image_path,
+            **gen_kwargs,
+        )
+        return getattr(result, "text", None) or ""
+
+    async def stream_mlx_vision(chat_dicts, max_tokens, image_path, request, samp) -> AsyncGenerator[str, None]:
         """Stream tokens from MLX vision model (with optional image)."""
         # Vision model streaming is more complex, fall back to non-streaming
         # and send as single chunk
         chat_id = f"chatcmpl-{uuid.uuid4().hex[:8]}"
         created = int(time.time())
 
-        num_images = 1 if image_path else 0
-        formatted_prompt = apply_chat_template(
-            state["processor"], state["model"].config, user_message, num_images=num_images
+        response_text = _vlm_chat_generate(
+            chat_dicts, max_tokens, image_path, request, samp
         )
-        result = vlm_generate(
-            state["model"], state["processor"], formatted_prompt,
-            image=image_path,
-            max_tokens=max_tokens, verbose=False
-        )
-        response_text = result.text
         # Clean up temp image file
         if image_path:
             try:
@@ -671,7 +741,7 @@ def run_server_mode(model, tokenizer, processor, model_name, model_type, host="0
                     )
                 elif IS_MACOS and MLX_VLM_AVAILABLE and state["model_type"] == "vision":
                     return StreamingResponse(
-                        stream_mlx_vision(user_message, max_tokens, image_path=image_path),
+                        stream_mlx_vision(chat_dicts, max_tokens, image_path, request, samp),
                         media_type="text/event-stream"
                     )
                 else:
@@ -694,17 +764,10 @@ def run_server_mode(model, tokenizer, processor, model_name, model_type, host="0
                 )
 
             elif IS_MACOS and MLX_VLM_AVAILABLE and state["model_type"] == "vision":
-                # MLX vision model — string prompt (mlx_vlm helper is not role-native yet)
-                num_images = 1 if image_path else 0
-                formatted_prompt = apply_chat_template(
-                    state["processor"], state["model"].config, user_message, num_images=num_images
+                # mlx-vlm: native messages + family sampling (qwen4_exp chat template).
+                response_text = _vlm_chat_generate(
+                    chat_dicts, max_tokens, image_path, request, samp
                 )
-                result = vlm_generate(
-                    state["model"], state["processor"], formatted_prompt,
-                    image=image_path,
-                    max_tokens=max_tokens, verbose=False
-                )
-                response_text = result.text
                 # Clean up temp image file
                 if image_path:
                     try:
@@ -938,10 +1001,11 @@ while switch_model:
         print(f"\nLoading {selected_desc} (MLX Vision)...")
         try:
             model, processor = vlm_load(selected_path)
+            _canonicalize_qwen4_exp_rmsnorm(model)
         except Exception as e:
             print(f"mlx-vlm failed to load this VLM: {type(e).__name__}: {e}")
-            print("Qwen3.8 VLMs need mlx-vlm>=0.6.8 (this folder was converted with 0.6.8).")
-            print("Fix:  pip install -U 'mlx-vlm>=0.6.8'")
+            print("Qwen3.8 VLMs need mlx-vlm>=0.6.8. Flash-Next (qwen4_exp) needs mlx-vlm git main.")
+            print("Fix:  pip install -U git+https://github.com/Blaizzy/mlx-vlm.git")
             raise
         tokenizer = None  # VLM uses processor
         

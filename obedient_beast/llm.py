@@ -304,12 +304,15 @@ class LLM:
         tool_prompt = ""
         if tools:
             # Short reminder only — the OpenAI tools array is the catalog.
-            # Qwen3.8 may emit <tool_call> or ```tool_call```; both are parsed.
+            # Qwen3.8 27B: JSON <tool_call> / ```tool_call```. Flash-Next (qwen4_exp): XML <function=>.
             tool_prompt = (
                 "\n\nUse the tools from the API when you need to act. "
                 "You may call several independent tools in one turn. "
-                "Formats: ```tool_call\\n{\"name\": \"...\", \"arguments\": {...}}\\n``` "
+                "Call a tool; do not describe calling it. "
+                "JSON: ```tool_call\\n{\"name\": \"...\", \"arguments\": {...}}\\n``` "
                 "or <tool_call>{\"name\": \"...\", \"arguments\": {...}}</tool_call>. "
+                "XML (Flash-Next): <tool_call>\\n<function=name>\\n"
+                "<parameter=arg>\\nvalue\\n</parameter>\\n</function>\\n</tool_call>. "
                 "Never retry a tool call that already succeeded. "
                 "When the user's task is done, answer in plain text."
             )
