@@ -273,12 +273,17 @@ async function connectToWhatsApp() {
                 })
 
                 if (!response.ok) {
-                    // 403 = not authorized — silently ignore (expected for non-allowed senders)
+                    // 403 = not authorized — print server reason (do not stay silent)
+                    let detail = ''
+                    try {
+                        const errBody = await response.json()
+                        detail = errBody.reason || errBody.error || ''
+                    } catch (_) { /* ignore */ }
                     if (response.status === 403) {
-                        console.log(`[Blocked] chat=${chatId} sender=${sender}`)
+                        console.log(`[Blocked] ${isGroup ? 'GROUP' : 'DM'} chat=${chatId} sender=${sender}${detail ? ` — ${detail}` : ''}`)
                         continue
                     }
-                    console.error(`Server error: ${response.status}`)
+                    console.error(`Server error: ${response.status}${detail ? ` — ${detail}` : ''}`)
                     continue
                 }
 
@@ -290,6 +295,9 @@ async function connectToWhatsApp() {
                 if (reply) {
                     console.log(`[Reply] ${reply.substring(0, 100)}...`)
                     await sock.sendMessage(chatId, { text: reply })
+                    console.log(`[Sent] reply to ${chatId}`)
+                } else {
+                    console.log(`[Warn] server returned empty reply for chat=${chatId}`)
                 }
 
                 // Send image if Beast included one (e.g., from screenshot tool)

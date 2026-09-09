@@ -94,6 +94,14 @@ def save_open_chats(chats: set):
 OPEN_CHATS = load_open_chats()
 
 
+def _chat_kind(chat_id: str | None) -> str:
+    if chat_id and str(chat_id).endswith("@g.us"):
+        return "GROUP"
+    if chat_id:
+        return "DM"
+    return "UNKNOWN"
+
+
 def is_allowed(sender: str, chat_id: str = None) -> bool:
     """
     Check if sender is allowed to trigger Beast.
@@ -109,8 +117,9 @@ def is_allowed(sender: str, chat_id: str = None) -> bool:
     # bridge.js sets sender="OWNER" when it detects the message is from
     # the same phone number that's running the WhatsApp session.
     if sender == "OWNER":
-        # Even OWNER respects group restrictions if ALLOWED_GROUPS is set
-        if chat_id and ALLOWED_GROUPS:
+        # OWNER DMs always allowed. OWNER in groups still respects ALLOWED_GROUPS.
+        is_group = bool(chat_id and chat_id.endswith("@g.us"))
+        if is_group and ALLOWED_GROUPS:
             group_id = chat_id.split("@")[0]
             if not any(group_id == g or group_id.endswith(g) for g in ALLOWED_GROUPS):
                 print(f"[Blocked] Group {group_id} not in allowed list")
@@ -205,27 +214,32 @@ def message():
         if not text:
             return jsonify({"response": "Usage: @beast <your message>"}), 200
 
+    # Trace every inbound WhatsApp message in the Beast Server window.
+    print(f"\n{'='*50}")
+    print(f"[In] [{_chat_kind(chat_id)}] sender={sender} chat={chat_id or '-'} text={text[:120]!r}")
+    if image_path:
+        print(f"[In] image={image_path}")
+
     # Check authorization
     if beast_mention and sender == "OWNER":
-        print(f"[@beast] OWNER mention in {chat_id}")
+        print(f"[Allow] OWNER @beast in {chat_id}")
     elif beast_mention and chat_id in OPEN_CHATS:
-        print(f"[@beast] Open-group mention by {sender} in {chat_id}")
+        print(f"[Allow] @beast in open group by {sender}")
     elif not is_allowed(sender, chat_id):
+        # is_allowed already printed [Blocked] with the specific rule
         return jsonify({"error": "Not authorized"}), 403
-
-    print(f"\n{'='*50}")
-    print(f"[{sender}] {text[:200]}")
-    if image_path:
-        print(f"[Attached image] {image_path}")
+    else:
+        print(f"[Allow] sender={sender} chat={chat_id or '-'}")
 
     # Use sender phone number as session ID for conversation continuity.
     # This means each WhatsApp contact has their own persistent conversation.
     session_id = f"wa_{sender.split('@')[0]}"
 
     try:
+        print("[Run] calling beast.run() …")
         with _run_lock:
             response = run(text, session_id, llm, image_path=image_path)
-        print(f"[Response] ({len(response)} chars) {response[:200]}...")
+        print(f"[Out] ({len(response)} chars) {response[:200]}...")
 
         # Check if Beast generated an image (e.g., screenshot tool was used).
         # If so, include the path in the response for bridge.js to send.
@@ -233,7 +247,7 @@ def message():
         result = {"response": response}
         if image_path:
             result["image"] = image_path
-            print(f"[Image] {image_path}")
+            print(f"[Out] image={image_path}")
 
         return jsonify(result)
 
@@ -248,8 +262,11 @@ if __name__ == "__main__":
     print("🐺 Obedient Beast Server")
     print(f"   Port: {PORT}")
     print(f"   Backend: {BACKEND}")
-    print(f"   Allowlist: {ALLOWED_NUMBERS if ALLOWED_NUMBERS else '(OWNER only — set ALLOWED_NUMBERS to add others)'}")
+    print(f"   ALLOWED_NUMBERS: {ALLOWED_NUMBERS if ALLOWED_NUMBERS else '(empty → OWNER only)'}")
+    print(f"   ALLOWED_GROUPS:  {ALLOWED_GROUPS if ALLOWED_GROUPS else '(any group)'}")
+    print(f"   RESPOND_TO_OTHERS: {RESPOND_TO_OTHERS}")
     if OPEN_CHATS:
-        print(f"   Open groups (@beast): {len(OPEN_CHATS)} group(s)")
+        print(f"   Open @beast groups: {len(OPEN_CHATS)}")
+    print("   Trace: [In] → [Allow]/[Blocked] → [Run] → [Out]/[Error]")
     print("=" * 60)
     app.run(host="0.0.0.0", port=PORT, debug=False)
